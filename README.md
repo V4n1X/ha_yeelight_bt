@@ -264,6 +264,18 @@ pytest
 
 The tests need Linux or WSL, like Home Assistant itself. The checklist for testing with real lamps is in [docs/hardware-test.md](docs/hardware-test.md).
 
+### Keep personal data out of the repository
+
+Bug reports and test results often contain Bluetooth addresses, host names, IP addresses or tokens. Please replace them with placeholders (e.g. `<lamp address>`); the lamps in the examples use public example addresses.
+
+Enable the checks once after cloning:
+
+```shell
+git config core.hooksPath .githooks
+```
+
+The `pre-commit` and `pre-push` hooks run `scripts/check_private_data.py` and refuse commits and pushes that contain credentials, private IP addresses, local host names, user paths or real MAC addresses, including commit messages. Add your own names, addresses and host names, one regular expression per line, to `.git/info/private-patterns`: that file is checked as well but never committed. The same checks and [Gitleaks](https://github.com/gitleaks/gitleaks) run in CI for every push and pull request.
+
 ## Credits and license
 
 Based on [hcoohb/hass-yeelightbt](https://github.com/hcoohb/hass-yeelightbt) by [@hcoohb](https://github.com/hcoohb), originally inspired by [python-yeelightbt](https://github.com/rytilahti/python-yeelightbt) by Teemu Rytilahti. Version 2 includes community work from [#79](https://github.com/hcoohb/hass-yeelightbt/pull/79), [#80](https://github.com/hcoohb/hass-yeelightbt/pull/80), [#81](https://github.com/hcoohb/hass-yeelightbt/issues/81) and the [mhdsallal fork](https://github.com/mhdsallal/hass-yeelightbt).

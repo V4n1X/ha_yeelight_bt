@@ -1,0 +1,4 @@
+#!/bin/sh
+# Refuse commits containing personal data (see scripts/check_private_data.py)
+PY=$(command -v python3 || command -v python)
+exec "$PY" scripts/check_private_data.py --staged

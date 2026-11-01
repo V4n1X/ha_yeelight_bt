@@ -4,3 +4,10 @@ __pycache__
 .ruff_cache
 
 .opencode/
+# never commit personal data
+.env
+*.log
+# Home Assistant diagnostics downloads contain device details
+config_entry-*.json
+device-*.json
+home-assistant_*.json
