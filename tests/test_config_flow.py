@@ -96,8 +96,9 @@ async def test_pick_discovered_device(
         CONF_MODEL: "Candela",
     }
     assert result["result"].unique_id == CANDELA_ADDRESS.lower()
-    # the connection was tested before the entry was created
-    assert lamp.commands()[0] == CMD_PAIR
+    # the connection was tested before the entry was created; a Candela only
+    # gets connected, it is never sent the pairing request
+    assert lamp.writes == []
     assert not lamp.is_connected
 
 
@@ -209,6 +210,8 @@ async def test_bluetooth_discovery(hass: HomeAssistant, lamp: FakeLampClient) ->
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_MODEL] == "Bedside"
+    # the Bedside is paired during the connection test
+    assert CMD_PAIR in lamp.commands()
 
     result = await hass.config_entries.flow.async_init(
         DOMAIN,

@@ -38,11 +38,11 @@ body:
       label: What works?
       options:
         - label: The lamp was discovered automatically
-        - label: Pairing worked (lamp pulsed / button pushed / nothing needed)
+        - label: Setup worked without pushing any button on the lamp
         - label: Turn on
         - label: Turn off
-        - label: Brightness
-        - label: The state stays correct after using the lamp's own button
+        - label: Brightness, also when turning on with a brightness
+        - label: The connection stays stable (no disconnects in the log for several minutes)
         - label: Works again after a Home Assistant restart
         - label: The entity shows "assumed state" (lightning buttons instead of a toggle)
   - type: textarea

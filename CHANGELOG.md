@@ -24,6 +24,18 @@ The integration follows the Home Assistant integration quality scale up to Plati
 - Fully typed (`mypy --strict`), test coverage 98 %.
 - Unused protocol helpers removed.
 - A deleted lamp is discovered again right away, without restarting Home Assistant (found in the hardware test).
+- Commands no longer fail during the first 10 s after the host booted (the "connection just failed" hold-off started at monotonic time 0).
+
+### Candela
+
+Reworked after comparing with two independent implementations that work with real lamps, the [Homey Candela app](https://github.com/KevinvOosterhout/com.kevinvanoosterhout.yeelightcandela) and [candelapy](https://github.com/praschak/candelapy) (protocol facts only, no code taken):
+
+- The pairing request is no longer sent. Neither implementation uses it, and it puts the Candela back into pairing mode and makes it drop the connection after a few seconds ([#81](https://github.com/hcoohb/hass-yeelightbt/issues/81)).
+- No notifications and no state, version or serial requests: their content was guessed and could overwrite the state with wrong values. The Candela always uses an assumed state.
+- Brightness is sent right after powering on; the 1.5 s wait is only needed by the Bedside.
+- Checking whether an unavailable Candela is back only connects, it sends nothing.
+- Only names `yeelight_ms` or `yeelight_ms` with a `_`, `-` or space suffix are detected as Candela.
+- README: supported model YLFW01YL (micro USB), switch underneath in the Bluetooth position.
 
 ### Marketplace
 
@@ -45,7 +57,7 @@ The integration follows the Home Assistant integration quality scale up to Plati
 
 - Discovery no longer crashes on bluetooth devices without a name ([#83](https://github.com/hcoohb/hass-yeelightbt/issues/83)).
 - Candela reports the `brightness` color mode it supports ([#69](https://github.com/hcoohb/hass-yeelightbt/issues/69), [#80](https://github.com/hcoohb/hass-yeelightbt/pull/80)).
-- Candela behind ESPHome bluetooth proxies: works without notifications, keeps an assumed state that is restored after a restart and ignores stale state echoes ([#76](https://github.com/hcoohb/hass-yeelightbt/issues/76), [#59](https://github.com/hcoohb/hass-yeelightbt/issues/59), [#29](https://github.com/hcoohb/hass-yeelightbt/issues/29), [#79](https://github.com/hcoohb/hass-yeelightbt/pull/79), [#81](https://github.com/hcoohb/hass-yeelightbt/issues/81)).
+- Candela, also behind ESPHome bluetooth proxies: command-only (see below), keeps an assumed state that is restored after a restart ([#76](https://github.com/hcoohb/hass-yeelightbt/issues/76), [#59](https://github.com/hcoohb/hass-yeelightbt/issues/59), [#29](https://github.com/hcoohb/hass-yeelightbt/issues/29), [#79](https://github.com/hcoohb/hass-yeelightbt/pull/79), [#81](https://github.com/hcoohb/hass-yeelightbt/issues/81)).
 - All bluetooth operations of a lamp are serialized, a failing command is retried once on a new connection ([#82](https://github.com/hcoohb/hass-yeelightbt/issues/82), [#56](https://github.com/hcoohb/hass-yeelightbt/issues/56)).
 - Pairing can no longer wait forever, which left lamps unavailable until HA was restarted ([#65](https://github.com/hcoohb/hass-yeelightbt/issues/65)).
 - Commands that could not be delivered raise an error instead of failing silently ([#49](https://github.com/hcoohb/hass-yeelightbt/issues/49)).

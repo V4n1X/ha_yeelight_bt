@@ -118,6 +118,7 @@ class FakeLampClient:
         )
         self.fail_writes = fail_writes
         self.writes: list[bytes] = []
+        self.notify_calls = 0
         self.is_connected = True
         self.disconnected_callback: Callable[[Any], None] | None = None
         self._handler: Callable[[Any, bytearray], None] | None = None
@@ -125,6 +126,7 @@ class FakeLampClient:
     async def start_notify(
         self, uuid: str, handler: Callable[[Any, bytearray], None]
     ) -> None:
+        self.notify_calls += 1
         if not self.notify:
             raise BleakError(
                 "Characteristic does not have a characteristic client config descriptor"

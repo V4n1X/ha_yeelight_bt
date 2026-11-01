@@ -12,6 +12,7 @@ import asyncio
 from collections.abc import Callable
 import enum
 import logging
+import re
 import struct
 import time
 from typing import Any
@@ -74,8 +75,8 @@ PAIR_GRACE_PERIOD = 1.0
 # Upper bound for one connect + pair + write cycle, so that a stuck backend
 # can never hold the lock (and make the lamp unavailable) forever.
 OPERATION_TIMEOUT = PAIR_BUTTON_TIMEOUT + 60.0
-# The Candela tends to echo an outdated state right after a command.
-STALE_STATE_WINDOW = 3.0
+# "yeelight_ms" or "yeelight_ms" with a suffix, like the Homey Candela app
+CANDELA_NAME = re.compile(r"^yeelight_ms(?:$|[_ -])", re.IGNORECASE)
 RETRY_DELAY = 0.5
 # Each attempt may take up to 20 s (bleak-retry-connector), so an unreachable
 # lamp fails within about a minute.
@@ -117,7 +118,7 @@ def model_from_name(ble_name: str | None) -> str:
     name = (ble_name or "").strip()
     if name.startswith("XMCTD_"):
         return MODEL_BEDSIDE
-    if name.startswith("yeelight_ms"):
+    if CANDELA_NAME.match(name):
         return MODEL_CANDELA
     return MODEL_UNKNOWN
 
@@ -165,12 +166,16 @@ class Lamp:
         self._pair_resp_event = asyncio.Event()
         self._pair_result: int | None = None
         self._notify_active = False
-        # None until the first connection told us whether notifications work
-        self._has_state_feedback: bool | None = None
+        # None until the first connection told us whether notifications work,
+        # the Candela never reports a usable state
+        self._has_state_feedback: bool | None = (
+            False if self._model == MODEL_CANDELA else None
+        )
         self._available = False
         self._contacted = False
-        self._last_command = 0.0
-        self._last_connect_failure = 0.0
+        # monotonic time of the last failed connection, None: none yet. Not 0.0:
+        # time.monotonic() starts at boot, right after it 0.0 looks recent.
+        self._last_connect_failure: float | None = None
 
     def __str__(self) -> str:
         """The string representation"""
@@ -253,6 +258,8 @@ class Lamp:
             if model != MODEL_UNKNOWN:
                 _LOGGER.debug("%s: model detected as %s", self._mac, model)
                 self._model = model
+                if model == MODEL_CANDELA:
+                    self._has_state_feedback = False
 
     def _current_ble_device(self) -> BLEDevice:
         """The newest BLEDevice for reconnect attempts of establish_connection."""
@@ -301,6 +308,15 @@ class Lamp:
         self._conn = Conn.UNPAIRED
         _LOGGER.debug("%s: connected", self._mac)
 
+        if self._model == MODEL_CANDELA:
+            # The Candela takes commands right away. It has no reliable state
+            # notifications, and the pairing request puts it back into pairing
+            # mode and makes it drop the connection after a few seconds (#81).
+            # Working implementations (Homey app, candelapy) do neither.
+            self._conn = Conn.PAIRED
+            self._set_available(True)
+            return
+
         await self._start_notify(client)
         await self._pair(client)
         self._set_available(True)
@@ -343,10 +359,6 @@ class Lamp:
                 async with asyncio.timeout(timeout):
                     await self._pair_resp_event.wait()
             except TimeoutError:
-                if self._model == MODEL_CANDELA and self._pair_answer() is None:
-                    # Candela does not always answer, even with notifications
-                    self._conn = Conn.PAIRED
-                    return
                 raise YeelightPairingError(
                     "The lamp did not answer the pairing request"
                     if self._pair_answer() is None
@@ -386,8 +398,8 @@ class Lamp:
     async def _write(client: BleakClient, bits: bytes) -> None:
         await client.write_gatt_char(CONTROL_UUID, bytearray(bits))
 
-    async def send_cmd(self, bits: bytes, wait_notif: float = 0.0) -> None:
-        """Connect and pair if needed, then send one command.
+    async def send_cmd(self, bits: bytes | None, wait_notif: float = 0.0) -> None:
+        """Connect and pair if needed, then send one command (None: connect only).
 
         A failing write is retried once on a fresh connection, as proxies and
         adapters regularly drop connections ("Connection reset by peer",
@@ -397,6 +409,7 @@ class Lamp:
         async with self._lock:
             if (
                 not self.is_connected
+                and self._last_connect_failure is not None
                 and time.monotonic() - self._last_connect_failure
                 < CONNECT_FAILURE_HOLDOFF
             ):
@@ -406,7 +419,8 @@ class Lamp:
                     async with asyncio.timeout(OPERATION_TIMEOUT):
                         await self._ensure_connected()
                         assert self._client is not None
-                        await self._write(self._client, bits)
+                        if bits is not None:
+                            await self._write(self._client, bits)
                 except (YeelightPairingError, YeelightConnectionError) as err:
                     await self._disconnect_client()
                     self._set_available(False, str(err))
@@ -430,7 +444,6 @@ class Lamp:
                     await self._disconnect_client()
                     raise
                 break
-            self._last_command = time.monotonic()
             self._set_available(True)
             if wait_notif:
                 await asyncio.sleep(wait_notif)
@@ -497,10 +510,12 @@ class Lamp:
     async def update(self) -> None:
         """Request the state of the lamp (sent back through a notification).
 
-        Lamps without state feedback (Candela behind most proxies) are only
-        contacted when they are unavailable, to find out if they are back.
+        Lamps without state feedback (Candela) are only contacted when they
+        are unavailable, to find out if they can be reached again.
         """
-        if self._available and self._has_state_feedback is False:
+        if self._has_state_feedback is False:
+            if not self._available:
+                await self.send_cmd(None)
             return
         bits = struct.pack("BBB15x", COMMAND_STX, CMD_GETSTATE, CMD_GETSTATE_SEC)
         _LOGGER.debug("Send Cmd: Get_state")
@@ -581,22 +596,11 @@ class Lamp:
 
         if res_type == RES_GETSTATE:
             state = struct.unpack(">xxBBBBBBBhx6x", data)
-            if (
-                self._model == MODEL_CANDELA
-                and time.monotonic() - self._last_command < STALE_STATE_WINDOW
-            ):
-                # Candela over proxies echoes the state from before the command
-                _LOGGER.debug("%s: ignoring stale Candela state", self._mac)
-                return
             self._is_on = state[0] == CMD_POWER_ON
-            if self._model == MODEL_CANDELA:
-                self._brightness = state[1]
-                self._mode = self.MODE_WHITE
-            else:
-                self._mode = state[1]
-                self._rgb = (state[2], state[3], state[4])
-                self._brightness = state[6]
-                self._temperature = state[7]
+            self._mode = state[1]
+            self._rgb = (state[2], state[3], state[4])
+            self._brightness = state[6]
+            self._temperature = state[7]
             _LOGGER.debug("%s", self)
             self.run_state_changed_cb()
 

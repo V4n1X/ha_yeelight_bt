@@ -38,9 +38,9 @@ Control the **Yeelight Bedside lamp** and the **Yeelight Candela** from Home Ass
 | Lamp | BLE name | Features | Status |
 | --- | --- | --- | --- |
 | Yeelight Bedside | `XMCTD_*` | on/off, brightness, color (HS), color temperature 1700–6500 K (real Kelvin) | Supported, tested with real hardware by the maintainer |
-| Yeelight Candela | `yeelight_ms*` | on/off, brightness | **Experimental**: the maintainer has no Candela, support is based on community reports. [Tell us how it works for you.](https://github.com/V4n1X/ha_yeelight_bt/issues/new?template=candela_report.yml) |
+| Yeelight Candela | `yeelight_ms*` | on/off, brightness | **Experimental**: the maintainer has no Candela. The implementation follows two independent implementations that work with real lamps ([Homey app](https://github.com/KevinvOosterhout/com.kevinvanoosterhout.yeelightcandela), [candelapy](https://github.com/praschak/candelapy)). [Tell us how it works for you.](https://github.com/V4n1X/ha_yeelight_bt/issues/new?template=candela_report.yml) |
 
-The Candela behind most proxies does not report its state. Home Assistant then shows an *assumed state* (lightning buttons instead of a toggle) and restores the last known state after a restart.
+Supported is the original Bluetooth Candela **YLFW01YL** (micro USB) with the **switch underneath it in the Bluetooth position**. It does not report its state: Home Assistant shows the last state it sent as an *assumed state* (lightning buttons instead of a toggle) and restores it after a restart. Changes made by twisting the lamp are not seen.
 
 ## Requirements
 
@@ -80,7 +80,7 @@ Lamps in range are **discovered automatically** and show up under **Settings →
 
 1. If the lamp was paired with another device before, [reset it](https://www.youtube.com/watch?v=PnjcOSgnbAM).
 2. On the first connection the lamp **pulses**. Push the small button on the lamp within 30 seconds. From then on it is paired with Home Assistant.
-3. **Candela**: it usually does not confirm the pairing. If it pulses, push its button and switch it again from Home Assistant. With a local adapter, pairing it once with `bluetoothctl` (`connect <MAC>`, then `pair <MAC>`) is known to help.
+3. **Candela**: no pairing is needed. Put the switch underneath the lamp in the Bluetooth position and charge it; Home Assistant can then control it right away.
 
 Once paired, do not connect the lamp to the Yeelight app anymore, or both will keep fighting for the connection.
 
@@ -126,7 +126,7 @@ The device page shows the model and the firmware version. **Download diagnostics
 - **Commands right after switching on**: the lamp ignores commands for about 1 s after powering on. Turning on with a color, brightness or temperature therefore takes about 2.5 s.
 - **One connection at a time**: while Home Assistant is connected, the Yeelight app cannot connect to the lamp, and the other way round.
 - **Proxy slots**: every lamp occupies one connection slot of a Bluetooth proxy (ESPHome proxies have 3 by default). Shelly devices only forward advertisements and cannot connect.
-- **Candela**: behind most proxies it does not report its state, so it is shown with an assumed state that is restored after a restart.
+- **Candela**: it does not report its state (also not after twisting it), so the last state sent by Home Assistant is shown and restored after a restart. Its built-in flame mode cannot be selected, no Bluetooth command for it is known.
 - **An unreachable lamp** fails a command after about a minute (3 connection attempts of up to 20 s).
 
 ## Examples
@@ -205,6 +205,7 @@ The lamp keeps its pairing. To use it with the Yeelight app again, [reset it](ht
 <details>
 <summary><b>The lamp is unavailable or does not react</b></summary>
 
+- **Candela**: the switch underneath the lamp must be in the Bluetooth position, and the lamp must be charged.
 - Proxies need active connections and a free connection slot per lamp.
 - Watch for the pulsing lamp after a reset: it waits for its button to be pushed.
 - Move the proxy closer, Bluetooth range through walls is short.

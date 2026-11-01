@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from bleak import BleakError
@@ -22,7 +22,6 @@ from custom_components.yeelight_bt.yeelightbt import (
     PAIR_NOT_PAIRED,
     PAIR_REQUESTED,
     PAIR_SUCCESS,
-    RES_GETSTATE,
     Lamp,
     YeelightConnectionError,
     YeelightError,
@@ -48,6 +47,8 @@ from .conftest import (
         ("XMCTD_123456", MODEL_BEDSIDE),
         ("yeelight_ms", MODEL_CANDELA),
         (" yeelight_ms ", MODEL_CANDELA),
+        ("YEELIGHT_MS_1234", MODEL_CANDELA),
+        ("yeelight_msdifferent", MODEL_UNKNOWN),
     ],
 )
 def test_model_from_name(name: str | None, model: str) -> None:
@@ -60,8 +61,10 @@ def test_model_override_for_unnamed_device() -> None:
     assert lamp.model == MODEL_CANDELA
     lamp = Lamp(ble_device(CANDELA_ADDRESS, None))
     assert lamp.model == MODEL_UNKNOWN
+    assert lamp.has_state_feedback is None
     lamp.set_ble_device(ble_device(CANDELA_ADDRESS, "yeelight_ms"))
     assert lamp.model == MODEL_CANDELA
+    assert lamp.has_state_feedback is False
 
 
 async def test_bedside_connect_pair_and_state(connector) -> None:
@@ -112,50 +115,64 @@ async def test_pairing_failures(connector, responses: tuple[int, ...]) -> None:
     assert client.commands() == [CMD_PAIR]
 
 
-async def test_candela_without_notifications(connector) -> None:
-    """Candela behind an ESPHome proxy has no CCCD: assume paired, no polling."""
-    client = FakeLampClient(notify=False)
-    connector(client)
+async def test_candela_is_command_only(connector) -> None:
+    """Like the working Homey app and candelapy: no pairing, no notifications,
+    no state requests, commands right after connecting (upstream #81, #76)."""
+    client = FakeLampClient()
+    fake = connector(client)
     lamp = Lamp(ble_device(CANDELA_ADDRESS, "yeelight_ms"))
-
-    await lamp.update()
-    assert lamp.available
     assert lamp.has_state_feedback is False
-    assert client.commands() == [CMD_PAIR, CMD_GETSTATE]
 
+    # first contact only checks that the lamp can be reached
     await lamp.update()
-    assert client.commands() == [CMD_PAIR, CMD_GETSTATE]
-
-    await lamp.set_brightness(40)
-    assert lamp.brightness == 40
-    assert client.writes[-1][:3] == bytes((COMMAND_STX, CMD_BRIGHTNESS, 40))
-
-
-async def test_candela_without_pair_answer(connector) -> None:
-    """Candela with notifications but without pairing answer is assumed paired."""
-    client = FakeLampClient(pair_responses=())
-    connector(client)
-    lamp = Lamp(ble_device(CANDELA_ADDRESS, "yeelight_ms"))
-
-    await lamp.turn_off()
-
     assert lamp.available
-    assert not lamp.is_on
+    assert len(fake.connections) == 1
+    assert client.writes == []
+    assert client.notify_calls == 0
+
+    # while available nothing is polled
+    await lamp.update()
+    assert len(fake.connections) == 1
+
+    await lamp.turn_on()
+    await lamp.set_brightness(40)
+    assert client.commands() == [CMD_POWER, CMD_BRIGHTNESS]
+    assert client.writes[-1][:3] == bytes((COMMAND_STX, CMD_BRIGHTNESS, 40))
+    assert lamp.is_on
+    assert lamp.brightness == 40
 
 
-async def test_candela_ignores_stale_state(connector) -> None:
-    client = FakeLampClient(notify=False)
+async def test_candela_never_sends_pairing(connector) -> None:
+    """The pairing request makes a Candela drop the connection, also on reconnects."""
+    client = FakeLampClient()
     connector(client)
     lamp = Lamp(ble_device(CANDELA_ADDRESS, "yeelight_ms"))
     await lamp.turn_on()
+    client.disconnected_callback(client)
+    await lamp.turn_off()
+    assert CMD_PAIR not in client.commands()
+    assert client.commands() == [CMD_POWER, CMD_POWER]
 
-    lamp.handle_notification(bytes(frame(COMMAND_STX, RES_GETSTATE, 0x02, 50)))
+
+async def test_unreachable_candela_is_probed(connector) -> None:
+    client = FakeLampClient()
+    connector(client)
+    lamp = Lamp(ble_device(CANDELA_ADDRESS, "yeelight_ms"))
+    lamp._set_available(False, "test")
+    await lamp.update()
+    assert lamp.available
+    assert client.writes == []
+
+
+async def test_works_right_after_system_start(connector) -> None:
+    """time.monotonic() counts from boot: a lamp must be usable 5 s after it."""
+    connector(FakeLampClient())
+    # replace the clock of yeelightbt only, asyncio keeps its own
+    with patch.object(yeelightbt, "time", SimpleNamespace(monotonic=lambda: 5.0)):
+        lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+        await lamp.turn_on()
+    assert lamp.available
     assert lamp.is_on
-
-    lamp._last_command = time.monotonic() - 10
-    lamp.handle_notification(bytes(frame(COMMAND_STX, RES_GETSTATE, 0x02, 50)))
-    assert not lamp.is_on
-    assert lamp.brightness == 50
 
 
 async def test_write_retried_on_new_connection(connector) -> None:
@@ -273,7 +290,7 @@ async def test_logs_once_when_unavailable_and_back(caplog, connector) -> None:
     client.fail_writes = 100
     client.is_connected = False
     for _ in range(3):
-        lamp._last_connect_failure = 0
+        lamp._last_connect_failure = None
         with pytest.raises(YeelightError):
             await lamp.update()
     client.fail_writes = 0

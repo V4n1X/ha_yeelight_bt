@@ -285,7 +285,10 @@ class YeelightBT(LightEntity, RestoreEntity):
                 for attr in (ATTR_HS_COLOR, ATTR_COLOR_TEMP_KELVIN, ATTR_BRIGHTNESS)
             ):
                 return
-            await asyncio.sleep(POWER_ON_DELAY)
+            if self._dev.model != MODEL_CANDELA:
+                # the Candela takes the next command right away (Homey app,
+                # candelapy), the Bedside ignores it for about 1 s
+                await asyncio.sleep(POWER_ON_DELAY)
 
         modes = self._attr_supported_color_modes or set()
         if ATTR_HS_COLOR in kwargs and ColorMode.HS in modes:
