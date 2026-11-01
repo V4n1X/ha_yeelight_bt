@@ -44,8 +44,9 @@ UPDATE_INTERVAL = timedelta(seconds=30)
 UPDATE_TIMEOUT = 120
 RECONNECT_DELAY = 5
 # Pause between powering on and a follow-up command, the lamp ignores
-# commands while it is still powering on.
-POWER_ON_DELAY = 0.5
+# commands while it is still powering on (measured on a Bedside: 0.5 s is
+# ignored, 1.0 s works).
+POWER_ON_DELAY = 1.5
 # Lamps stop their transition when they receive a command, so give the
 # transition some time before HA sends the next one.
 TRANSITION_DELAY = 0.7

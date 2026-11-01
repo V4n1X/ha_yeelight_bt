@@ -76,6 +76,8 @@ OPERATION_TIMEOUT = PAIR_BUTTON_TIMEOUT + 60.0
 # The Candela tends to echo an outdated state right after a command.
 STALE_STATE_WINDOW = 3.0
 RETRY_DELAY = 0.5
+# Some backends (e.g. WinRT) raise a plain OSError when the link drops.
+RETRY_EXCEPTIONS = (*BLEAK_RETRY_EXCEPTIONS, OSError)
 
 
 class Conn(enum.Enum):
@@ -340,7 +342,7 @@ class Lamp:
             return
         try:
             await client.disconnect()
-        except BLEAK_RETRY_EXCEPTIONS as err:
+        except RETRY_EXCEPTIONS as err:
             _LOGGER.debug("%s: error while disconnecting: %s", self._mac, err)
 
     async def disconnect(self) -> None:
@@ -369,7 +371,7 @@ class Lamp:
                     await self._disconnect_client()
                     self._set_available(False)
                     raise
-                except BLEAK_RETRY_EXCEPTIONS as err:
+                except RETRY_EXCEPTIONS as err:
                     await self._disconnect_client()
                     if attempt == 1:
                         _LOGGER.debug(
@@ -484,7 +486,8 @@ class Lamp:
         await self.send_cmd(bits)
         self._is_on = False
 
-    # set_brightness/temperature/color do NOT send a notification back.
+    # set_brightness/temperature/color do NOT send a notification back and are
+    # ignored by a lamp that is off (or still powering on, about 1 s).
     # However, the lamp takes time to transition to new state
     # and if another command (including get_state) is sent during that time,
     # it stops the transition where it is...
@@ -495,7 +498,6 @@ class Lamp:
         bits = struct.pack("BBB15x", COMMAND_STX, CMD_BRIGHTNESS, brightness)
         await self.send_cmd(bits)
         self._brightness = brightness
-        self._is_on = True
 
     async def set_temperature(self, kelvin: int, brightness: int | None = None) -> None:
         """Set the temperature (White mode) [1700 - 6500 K] (no notif)"""
@@ -509,7 +511,6 @@ class Lamp:
         self._temperature = kelvin
         self._brightness = brightness
         self._mode = self.MODE_WHITE
-        self._is_on = True
 
     async def set_color(
         self, red: int, green: int, blue: int, brightness: int | None = None
@@ -527,7 +528,6 @@ class Lamp:
         self._rgb = (red, green, blue)
         self._brightness = brightness
         self._mode = self.MODE_COLOR
-        self._is_on = True
 
     async def get_name(self) -> None:
         """Get the name from the lamp (through notif)"""
@@ -630,7 +630,7 @@ class Lamp:
                 if "read" in char.properties:
                     try:
                         value = bytes(await self._client.read_gatt_char(char))
-                    except BLEAK_RETRY_EXCEPTIONS as err:
+                    except RETRY_EXCEPTIONS as err:
                         value = err
                 _LOGGER.info(
                     "__[Characteristic] %s (%s), Value: %s",

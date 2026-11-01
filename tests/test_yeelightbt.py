@@ -123,7 +123,6 @@ async def test_candela_without_notifications(connector) -> None:
     assert client.commands() == [CMD_PAIR, CMD_GETSTATE]
 
     await lamp.set_brightness(40)
-    assert lamp.is_on
     assert lamp.brightness == 40
     assert client.writes[-1][:3] == bytes((COMMAND_STX, CMD_BRIGHTNESS, 40))
 
@@ -166,6 +165,37 @@ async def test_write_retried_on_new_connection(connector) -> None:
 
     assert fake.connections == [broken, good]
     assert not broken.is_connected
+    assert good.commands()[-1] == CMD_POWER
+    assert lamp.available
+
+
+async def test_set_commands_do_not_power_on(connector) -> None:
+    """A lamp that is off ignores color/brightness/temperature (hardware test)."""
+    connector(FakeLampClient())
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+    await lamp.turn_off()
+
+    await lamp.set_color(255, 0, 0)
+    await lamp.set_brightness(30)
+    await lamp.set_temperature(4000)
+    assert not lamp.is_on
+
+
+async def test_os_error_is_retried(connector) -> None:
+    """WinRT raises a plain OSError when the link drops (hardware test)."""
+    broken = FakeLampClient()
+    good = FakeLampClient()
+    fake = connector(broken, good)
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+    await lamp.update()
+
+    async def closed(*args, **kwargs):
+        raise OSError("[WinError -2147483629] The object has been closed")
+
+    broken.write_gatt_char = closed  # type: ignore[method-assign]
+    await lamp.turn_on()
+
+    assert fake.connections == [broken, good]
     assert good.commands()[-1] == CMD_POWER
     assert lamp.available
 

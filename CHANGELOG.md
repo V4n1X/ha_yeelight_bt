@@ -30,6 +30,9 @@ Requires Home Assistant 2026.10 or newer, tested with 2026.10 and 2026.11.
 - All bluetooth operations of a lamp are serialized, a failing command is retried once on a new connection ([#82](https://github.com/hcoohb/hass-yeelightbt/issues/82), [#56](https://github.com/hcoohb/hass-yeelightbt/issues/56)).
 - Pairing can no longer wait forever, which left lamps unavailable until HA was restarted ([#65](https://github.com/hcoohb/hass-yeelightbt/issues/65)).
 - Commands that could not be delivered raise an error instead of failing silently ([#49](https://github.com/hcoohb/hass-yeelightbt/issues/49)).
+- Turning on with a color, brightness or temperature works: the Bedside ignores commands for about 1 s after powering on, the integration now waits 1.5 s (measured on hardware, [#37](https://github.com/hcoohb/hass-yeelightbt/issues/37)).
+- Color, brightness or temperature commands no longer mark a lamp as on, a lamp that is off ignores them.
+- A plain `OSError` from the bluetooth backend (e.g. WinRT, broken pipe) is retried like any other connection error.
 - The model is stored in the config entry, lamps whose advertisement carries no name keep working.
 - The lamp follows the best adapter/proxy chosen by HA bluetooth.
 - Color mode switches between `color_temp` and `hs` according to the lamp state (was always `hs`).
