@@ -3,6 +3,10 @@ name: Privacy
 on:
   push:
   pull_request:
+  # full history scan
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * 1"
 
 permissions:
   contents: read
