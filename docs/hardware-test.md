@@ -38,6 +38,26 @@ Note the setup: Home Assistant version, integration version, local adapter or pr
 - [ ] Rename the entity ID: the lamp keeps working under the new ID.
 - [ ] Reload and delete the config entry without errors in the log.
 
+## Test runs
+
+### 2026-11-01, Bedside, protocol level (no HA)
+
+Bedside (`XMCTD_`, firmware 8705-8753-9016) on Windows/WinRT (Qualcomm FastConnect 7800), bleak 3.0.2, using `yeelightbt.Lamp` directly. 17/17 automated checks passed after the fixes below, plus a visual check:
+
+| Check | Result |
+| --- | --- |
+| Discovery (advertised name `XMCTD_`), connect + pair | OK, about 4 s, no button needed; reconnect answers "already paired" (0x04) |
+| On / off, brightness 1 %, 10 %, 100 % | OK; 1 % is very dim but on |
+| White 1700 K / 4080 K / 6500 K | OK: very warm / neutral white / cold bluish. 4080 K, where HA's "white" is mapped, looks neutral |
+| Red, green, blue, purple | OK |
+| Change on the lamp's touch slider | reported by the lamp on the next state request |
+| 10 brightness commands in a row | OK, about 90 ms per command |
+| Command right after power on | **Ignored within 0.5 s, accepted after 1.0 s** → `POWER_ON_DELAY` raised to 1.5 s |
+| Color/brightness/temperature while off | ignored by the lamp → no longer marked as on |
+| Fast reconnect on WinRT | raised a plain `OSError` → now retried |
+
+Still to do in Home Assistant: discovery and config flow, entity behaviour, HA restart, unplugging the lamp, proxy restart, long run.
+
 ## Candela
 
 The maintainer has no Candela. Candela results come from users through the [Candela test report](https://github.com/V4n1X/ha_yeelight_bt/issues/new?template=candela_report.yml) issue template.
