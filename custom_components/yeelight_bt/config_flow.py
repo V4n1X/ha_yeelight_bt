@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any
 
 from homeassistant.components.bluetooth import (
     BluetoothServiceInfoBleak,
+    async_ble_device_from_address,
     async_discovered_service_info,
 )
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
@@ -18,15 +20,35 @@ from homeassistant.helpers.selector import (
     SelectSelectorConfig,
     SelectSelectorMode,
 )
-import voluptuous as vol
+import probatio
 
 from .const import CONF_MODEL, DOMAIN, MODEL_AUTO
-from .yeelightbt import MODEL_BEDSIDE, MODEL_CANDELA, MODEL_UNKNOWN, model_from_name
+from .yeelightbt import (
+    MODEL_BEDSIDE,
+    MODEL_CANDELA,
+    MODEL_UNKNOWN,
+    PAIR_BUTTON_TIMEOUT,
+    Lamp,
+    YeelightError,
+    model_from_name,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 MAC_REGEX = re.compile(r"^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$")
 MODEL_OPTIONS = {"bedside": MODEL_BEDSIDE, "candela": MODEL_CANDELA}
+# connect + pairing (incl. the time to push the button) + one command
+CONNECTION_TEST_TIMEOUT = PAIR_BUTTON_TIMEOUT + 60
+
+
+def _model_selector() -> SelectSelector:
+    return SelectSelector(
+        SelectSelectorConfig(
+            options=[MODEL_AUTO, *MODEL_OPTIONS],
+            mode=SelectSelectorMode.DROPDOWN,
+            translation_key="model",
+        )
+    )
 
 
 class Yeelight_btConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -37,6 +59,26 @@ class Yeelight_btConfigFlow(ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         self._discovery_info: BluetoothServiceInfoBleak | None = None
         self._discovered: dict[str, str] = {}
+
+    async def _async_test_connection(
+        self, address: str, model: str | None
+    ) -> str | None:
+        """Connect and pair once, return an error key or None."""
+        ble_device = async_ble_device_from_address(
+            self.hass, address.upper(), connectable=True
+        )
+        if ble_device is None:
+            return "not_found"
+        lamp = Lamp(ble_device, model=model)
+        try:
+            async with asyncio.timeout(CONNECTION_TEST_TIMEOUT):
+                await lamp.update()
+        except (YeelightError, TimeoutError) as err:
+            _LOGGER.debug("Connection test with %s failed: %s", address, err)
+            return "cannot_connect"
+        finally:
+            await lamp.disconnect()
+        return None
 
     async def async_step_bluetooth(
         self, discovery_info: BluetoothServiceInfoBleak
@@ -59,19 +101,20 @@ class Yeelight_btConfigFlow(ConfigFlow, domain=DOMAIN):
         """Confirm the discovered lamp and give it a name."""
         assert self._discovery_info is not None
         info = self._discovery_info
+        model = model_from_name(info.name)
+        errors: dict[str, str] = {}
         if user_input is not None:
-            return self._create_entry(
-                user_input[CONF_NAME], info.address, model_from_name(info.name)
-            )
+            if not (error := await self._async_test_connection(info.address, model)):
+                return self._create_entry(user_input[CONF_NAME], info.address, model)
+            errors["base"] = error
         return self.async_show_form(
             step_id="bluetooth_confirm",
-            data_schema=vol.Schema(
-                {vol.Required(CONF_NAME, default=self._default_name(info)): str}
+            data_schema=self.add_suggested_values_to_schema(
+                probatio.Schema({probatio.Required(CONF_NAME): str}),
+                user_input or {CONF_NAME: self._default_name(info)},
             ),
-            description_placeholders={
-                "model": model_from_name(info.name),
-                "address": info.address,
-            },
+            description_placeholders={"model": model, "address": info.address},
+            errors=errors,
         )
 
     async def async_step_user(
@@ -86,37 +129,45 @@ class Yeelight_btConfigFlow(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Select one of the lamps seen by HA bluetooth (adapters and proxies)."""
+        errors: dict[str, str] = {}
         if user_input is not None:
             address = user_input[CONF_MAC]
             await self.async_set_unique_id(
                 dr.format_mac(address), raise_on_progress=False
             )
             self._abort_if_unique_id_configured()
-            return self._create_entry(
-                user_input[CONF_NAME], address, self._discovered[address]
-            )
+            model = self._discovered[address]
+            if not (error := await self._async_test_connection(address, model)):
+                return self._create_entry(user_input[CONF_NAME], address, model)
+            errors["base"] = error
+        else:
+            current_ids = self._async_current_ids(include_ignore=False)
+            self._discovered = {}
+            for info in async_discovered_service_info(self.hass, connectable=True):
+                # Devices without a name are reported with name=None by bleak (#83)
+                model = model_from_name(info.name)
+                if model == MODEL_UNKNOWN or dr.format_mac(info.address) in current_ids:
+                    continue
+                self._discovered[info.address] = model
+            if not self._discovered:
+                return self.async_abort(reason="no_devices_found")
 
-        current_ids = self._async_current_ids(include_ignore=False)
-        names: dict[str, str] = {}
-        for info in async_discovered_service_info(self.hass, connectable=True):
-            # Devices without a name are reported with name=None by bleak (#83)
-            model = model_from_name(info.name)
-            if model == MODEL_UNKNOWN or dr.format_mac(info.address) in current_ids:
-                continue
-            self._discovered[info.address] = model
-            names[info.address] = f"{info.name} - {model} ({info.address})"
-
-        if not names:
-            return self.async_abort(reason="no_devices_found")
-
+        names = {
+            address: f"Yeelight {model} ({address})"
+            for address, model in self._discovered.items()
+        }
         return self.async_show_form(
             step_id="pick_device",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_MAC): vol.In(names),
-                    vol.Required(CONF_NAME): str,
-                }
+            data_schema=self.add_suggested_values_to_schema(
+                probatio.Schema(
+                    {
+                        probatio.Required(CONF_MAC): probatio.In(names),
+                        probatio.Required(CONF_NAME): str,
+                    }
+                ),
+                user_input,
             ),
+            errors=errors,
         )
 
     async def async_step_manual(
@@ -132,31 +183,53 @@ class Yeelight_btConfigFlow(ConfigFlow, domain=DOMAIN):
                 address = address.replace("-", ":").upper()
                 await self.async_set_unique_id(dr.format_mac(address))
                 self._abort_if_unique_id_configured()
-                return self._create_entry(
-                    user_input[CONF_NAME],
-                    address,
-                    MODEL_OPTIONS.get(user_input.get(CONF_MODEL, MODEL_AUTO)),
-                )
+                model = MODEL_OPTIONS.get(user_input.get(CONF_MODEL, MODEL_AUTO))
+                if not (error := await self._async_test_connection(address, model)):
+                    return self._create_entry(user_input[CONF_NAME], address, model)
+                errors["base"] = error
 
         return self.async_show_form(
             step_id="manual",
             data_schema=self.add_suggested_values_to_schema(
-                vol.Schema(
+                probatio.Schema(
                     {
-                        vol.Required(CONF_NAME): str,
-                        vol.Required(CONF_MAC): str,
-                        vol.Required(CONF_MODEL, default=MODEL_AUTO): SelectSelector(
-                            SelectSelectorConfig(
-                                options=[MODEL_AUTO, *MODEL_OPTIONS],
-                                mode=SelectSelectorMode.DROPDOWN,
-                                translation_key="model",
-                            )
-                        ),
+                        probatio.Required(CONF_NAME): str,
+                        probatio.Required(CONF_MAC): str,
+                        probatio.Required(
+                            CONF_MODEL, default=MODEL_AUTO
+                        ): _model_selector(),
                     }
                 ),
                 user_input,
             ),
             errors=errors,
+        )
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Change the model of a configured lamp."""
+        entry = self._get_reconfigure_entry()
+        if user_input is not None:
+            data = {k: v for k, v in entry.data.items() if k != CONF_MODEL}
+            if model := MODEL_OPTIONS.get(user_input[CONF_MODEL]):
+                data[CONF_MODEL] = model
+            return self.async_update_reload_and_abort(entry, data=data)
+
+        current = next(
+            (k for k, v in MODEL_OPTIONS.items() if v == entry.data.get(CONF_MODEL)),
+            MODEL_AUTO,
+        )
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=self.add_suggested_values_to_schema(
+                probatio.Schema({probatio.Required(CONF_MODEL): _model_selector()}),
+                {CONF_MODEL: current},
+            ),
+            description_placeholders={
+                "name": entry.title,
+                "address": entry.data[CONF_MAC],
+            },
         )
 
     @staticmethod

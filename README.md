@@ -23,7 +23,11 @@ Control the **Yeelight Bedside lamp** and the **Yeelight Candela** from Home Ass
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Setup](#setup)
-- [How it works](#how-it-works)
+- [Supported functions](#supported-functions)
+- [Data updates](#data-updates)
+- [Known limitations](#known-limitations)
+- [Examples](#examples)
+- [Removing the integration](#removing-the-integration)
 - [Troubleshooting](#troubleshooting)
 - [Migrating from hcoohb/hass-yeelightbt](#migrating-from-hcoohbhass-yeelightbt)
 - [Contributing](#contributing)
@@ -33,7 +37,7 @@ Control the **Yeelight Bedside lamp** and the **Yeelight Candela** from Home Ass
 
 | Lamp | BLE name | Features | Status |
 | --- | --- | --- | --- |
-| Yeelight Bedside | `XMCTD_*` | on/off, brightness, color (HS), color temperature 1700–6500 K | Supported, tested with real hardware by the maintainer |
+| Yeelight Bedside | `XMCTD_*` | on/off, brightness, color (HS), color temperature 1700–6500 K (real Kelvin) | Supported, tested with real hardware by the maintainer |
 | Yeelight Candela | `yeelight_ms*` | on/off, brightness | **Experimental**: the maintainer has no Candela, support is based on community reports. [Tell us how it works for you.](https://github.com/V4n1X/ha_yeelight_bt/issues/new?template=candela_report.yml) |
 
 The Candela behind most proxies does not report its state. Home Assistant then shows an *assumed state* (lightning buttons instead of a toggle) and restores the last known state after a restart.
@@ -80,15 +84,113 @@ Lamps in range are **discovered automatically** and show up under **Settings →
 
 Once paired, do not connect the lamp to the Yeelight app anymore, or both will keep fighting for the connection.
 
-## How it works
+### Setup parameters
 
-| Topic | Behaviour |
+| Parameter | Description |
 | --- | --- |
-| State | The Bedside pushes its state. It is additionally polled every 30 s in the background, so changes made on the lamp are seen. |
-| Connection drops | Proxies and adapters regularly drop connections. A failing command is retried once on a new connection. |
-| Availability | A lamp becomes unavailable only when it cannot be reached at all, and is retried every 30 s. |
-| Errors | A command that could not be delivered raises an error, visible in the UI and in automation traces. |
-| Adapters / proxies | The integration always connects through the adapter or proxy that Home Assistant considers best for the lamp. |
+| Lamp name | Name of the device in Home Assistant. |
+| Lamp / MAC address | The lamp to connect to. Manual entry accepts `AA:BB:CC:DD:EE:FF` or `AA-BB-…`. |
+| Model | Manual entry only: *Detect automatically*, *Bedside* or *Candela*. |
+
+Home Assistant connects to the lamp before the setup finishes, so a lamp that cannot be reached or paired is reported right away instead of ending up as an unavailable device.
+
+### Options
+
+- **Reconfigure** (⋮ menu of the lamp under **Settings → Devices & services → Yeelight Bluetooth**): change the model, e.g. when a Candela was detected as Bedside. A repair issue tells you when the model could not be detected.
+- **System options → Enable polling**: when turned off, the integration no longer requests the state every 30 s. The lamp still pushes changes while it is connected, and `homeassistant.update_entity` refreshes it on demand.
+
+## Supported functions
+
+One light entity per lamp:
+
+| | Bedside | Candela |
+| --- | --- | --- |
+| On / off | ✓ | ✓ |
+| Brightness | 1–100 % | 1–100 % |
+| Color temperature | 1700–6500 K (real Kelvin, as reported by the lamp) | – |
+| Color (hue / saturation) | ✓ | – |
+| State changes made on the lamp | pushed to Home Assistant | usually not reported (assumed state) |
+
+The device page shows the model and the firmware version. **Download diagnostics** on the device page collects the lamp state, model, connection and the adapter/proxy with its signal strength, for bug reports.
+
+## Data updates
+
+- While connected, the Bedside **pushes** every state change, including changes made with its touch controls.
+- In addition the state is **requested every 30 s** in the background; a dropped connection is re-established within a few seconds.
+- A lamp is marked **unavailable** only when it cannot be reached (about a minute for a lamp that is unplugged) and is retried every 30 s. It is logged once when it becomes unavailable and once when it is back.
+- The integration always connects through the adapter or proxy Home Assistant considers best for the lamp.
+
+## Known limitations
+
+- **Transitions and effects** are not supported, the lamp fades with its own fixed speed.
+- **Commands right after switching on**: the lamp ignores commands for about 1 s after powering on. Turning on with a color, brightness or temperature therefore takes about 2.5 s.
+- **One connection at a time**: while Home Assistant is connected, the Yeelight app cannot connect to the lamp, and the other way round.
+- **Proxy slots**: every lamp occupies one connection slot of a Bluetooth proxy (ESPHome proxies have 3 by default). Shelly devices only forward advertisements and cannot connect.
+- **Candela**: behind most proxies it does not report its state, so it is shown with an assumed state that is restored after a restart.
+- **An unreachable lamp** fails a command after about a minute (3 connection attempts of up to 20 s).
+
+## Examples
+
+Wake-up light: warm and dim first, bright neutral white ten minutes later.
+
+```yaml
+alias: Wake-up light
+mode: single
+triggers:
+  - trigger: time
+    at: "06:30:00"
+actions:
+  - action: light.turn_on
+    target:
+      entity_id: light.bedside
+    data:
+      color_temp_kelvin: 2700
+      brightness_pct: 10
+  - delay: "00:10:00"
+  - action: light.turn_on
+    target:
+      entity_id: light.bedside
+    data:
+      color_temp_kelvin: 4000
+      brightness_pct: 80
+```
+
+Night light: very warm and dim while there is motion in the bedroom, off two minutes after the motion has cleared.
+
+```yaml
+alias: Bedroom night light
+mode: restart
+triggers:
+  - trigger: motion.detected
+    target:
+      area_id: bedroom
+actions:
+  - action: light.turn_on
+    target:
+      entity_id: light.bedside
+    data:
+      color_temp_kelvin: 1700
+      brightness_pct: 5
+  - wait_for_trigger:
+      - trigger: motion.cleared
+        target:
+          area_id: bedroom
+        options:
+          behavior: all
+          for: "00:02:00"
+  - action: light.turn_off
+    target:
+      entity_id: light.bedside
+```
+
+Other use cases: a reading light with a fixed color temperature, a colored notification (e.g. red when the washing machine is done), or the lamp in scenes and light groups.
+
+## Removing the integration
+
+1. Go to **Settings → Devices & services → Yeelight Bluetooth**, open the ⋮ menu of the lamp and select **Delete**.
+2. If you installed it from the Marketplace/HACS and no lamp is left, remove the repository there as well and restart Home Assistant.
+
+The lamp keeps its pairing. To use it with the Yeelight app again, [reset it](https://www.youtube.com/watch?v=PnjcOSgnbAM).
 
 ## Troubleshooting
 
@@ -148,6 +250,8 @@ This project continues [hcoohb/hass-yeelightbt](https://github.com/hcoohb/hass-y
 2. Install this repository as described above and restart Home Assistant.
 
 Lamps whose model was never stored are detected again on the first start. The changes are listed in the [changelog](CHANGELOG.md).
+
+> **Color temperature is real Kelvin now.** Version 1.x shifted the values so that the middle of the slider looked white: 2740 K in Home Assistant became about 4080 K on the lamp. Version 2 sends and shows the Kelvin value the lamp really uses. Automations and scenes with a color temperature look different after the update: use about 4000 K where you want neutral white.
 
 ## Contributing
 

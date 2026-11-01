@@ -12,14 +12,14 @@
       },
       "bluetooth_confirm": {
         "title": "Yeelight Bluetooth",
-        "description": "Eine Yeelight {model} wurde gefunden ({address}). Falls die Lampe bei der ersten Verbindung pulsiert, drücke ihre kleine Taste, um das Pairing abzuschließen.",
+        "description": "Eine Yeelight {model} wurde gefunden ({address}). Home Assistant verbindet sich beim Absenden mit der Lampe. Falls sie pulsiert, drücke innerhalb von 30 Sekunden ihre kleine Taste, um das Pairing abzuschließen.",
         "data": {
           "name": "Name der Lampe"
         }
       },
       "pick_device": {
         "title": "Yeelight Bluetooth",
-        "description": "Lampen, die von den Bluetooth-Adaptern und -Proxys von Home Assistant gesehen werden. Falls die Lampe bei der ersten Verbindung pulsiert, drücke ihre kleine Taste, um das Pairing abzuschließen.",
+        "description": "Lampen, die von den Bluetooth-Adaptern und -Proxys von Home Assistant gesehen werden. Home Assistant verbindet sich beim Absenden mit der Lampe. Falls sie pulsiert, drücke innerhalb von 30 Sekunden ihre kleine Taste, um das Pairing abzuschließen.",
         "data": {
           "mac": "Lampe",
           "name": "Name der Lampe"
@@ -27,22 +27,32 @@
       },
       "manual": {
         "title": "Yeelight Bluetooth",
-        "description": "Gib einen Namen und die MAC-Adresse der Lampe ein. Falls die Lampe bei der ersten Verbindung pulsiert, drücke ihre kleine Taste, um das Pairing abzuschließen.",
+        "description": "Gib einen Namen und die MAC-Adresse der Lampe ein. Home Assistant verbindet sich beim Absenden mit der Lampe. Falls sie pulsiert, drücke innerhalb von 30 Sekunden ihre kleine Taste, um das Pairing abzuschließen.",
         "data": {
           "name": "Name der Lampe",
           "mac": "MAC-Adresse",
           "model": "Modell"
         }
+      },
+      "reconfigure": {
+        "title": "{name} neu konfigurieren",
+        "description": "Ändere das Modell der Lampe {address}. Wähle das Modell aus, wenn es nicht richtig erkannt wird.",
+        "data": {
+          "model": "Modell"
+        }
       }
     },
     "error": {
-      "invalid_mac": "Keine gültige MAC-Adresse (Format AA:BB:CC:DD:EE:FF)."
+      "invalid_mac": "Keine gültige MAC-Adresse (Format AA:BB:CC:DD:EE:FF).",
+      "not_found": "Home Assistant sieht diese Lampe nicht. Sie muss Strom haben und in Reichweite eines Bluetooth-Adapters oder -Proxys sein.",
+      "cannot_connect": "Verbindung oder Pairing mit der Lampe fehlgeschlagen. Sie darf nicht mit der Yeelight-App verbunden sein; falls sie pulsiert, drücke ihre Taste. Ein Zurücksetzen der Lampe kann helfen."
     },
     "abort": {
       "already_configured": "Diese Lampe ist bereits eingerichtet.",
       "already_in_progress": "Die Einrichtung dieser Lampe läuft bereits.",
       "not_supported": "Dieses Gerät ist keine unterstützte Yeelight-Lampe.",
-      "no_devices_found": "Keine nicht eingerichtete Lampe gefunden. Die Lampe muss in Reichweite eines Bluetooth-Adapters oder -Proxys sein und darf nicht mit einer anderen App verbunden sein. Ein Zurücksetzen der Lampe kann helfen."
+      "no_devices_found": "Keine nicht eingerichtete Lampe gefunden. Die Lampe muss in Reichweite eines Bluetooth-Adapters oder -Proxys sein und darf nicht mit einer anderen App verbunden sein. Ein Zurücksetzen der Lampe kann helfen.",
+      "reconfigure_successful": "Die Lampe wurde neu konfiguriert."
     }
   },
   "selector": {
@@ -52,6 +62,12 @@
         "bedside": "Bedside",
         "candela": "Candela"
       }
+    }
+  },
+  "issues": {
+    "unknown_model": {
+      "title": "Modell von {name} nicht erkannt",
+      "description": "Die Lampe {address} meldet ihr Modell nicht, daher wird das Bedside-Protokoll verwendet. Falls es eine Candela ist, öffne die Integration, wähle bei {name} **Neu konfigurieren** und das Modell aus."
     }
   },
   "exceptions": {

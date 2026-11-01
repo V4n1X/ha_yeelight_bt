@@ -16,8 +16,9 @@ import struct
 import time
 from typing import Any
 
-from bleak import BleakClient, BleakError
+from bleak import BleakClient
 from bleak.backends.device import BLEDevice
+from bleak.exc import BleakError
 from bleak_retry_connector import (
     BLEAK_RETRY_EXCEPTIONS,
     BleakClientWithServiceCache,
@@ -218,8 +219,13 @@ class Lamp:
             except Exception:  # a callback must never break the BLE handling
                 _LOGGER.exception("Error in Yeelight state callback")
 
-    def _set_available(self, available: bool) -> None:
+    def _set_available(self, available: bool, reason: str | None = None) -> None:
         changed = available != self._available or not self._contacted
+        # Log once when the lamp becomes unreachable and once when it is back
+        if available and not self._available and self._contacted:
+            _LOGGER.info("Yeelight %s is available again", self._mac)
+        elif not available and (self._available or not self._contacted):
+            _LOGGER.info("Yeelight %s is unavailable: %s", self._mac, reason)
         self._contacted = True
         self._available = available
         if changed:
@@ -248,6 +254,15 @@ class Lamp:
                 _LOGGER.debug("%s: model detected as %s", self._mac, model)
                 self._model = model
 
+    def _current_ble_device(self) -> BLEDevice:
+        """The newest BLEDevice for reconnect attempts of establish_connection."""
+        self._refresh_ble_device()
+        return self._ble_device
+
+    def _pair_answer(self) -> int | None:
+        # Set by the notification handler while _pair() waits
+        return self._pair_result
+
     def _refresh_ble_device(self) -> None:
         if self._ble_device_callback is None:
             return
@@ -274,7 +289,7 @@ class Lamp:
                 self._mac,
                 disconnected_callback=self._disconnected_cb,
                 max_attempts=CONNECT_ATTEMPTS,
-                ble_device_callback=self._ble_device_callback,
+                ble_device_callback=self._current_ble_device,
             )
         except RETRY_EXCEPTIONS as err:
             # establish_connection already retried, do not start over
@@ -328,23 +343,23 @@ class Lamp:
                 async with asyncio.timeout(timeout):
                     await self._pair_resp_event.wait()
             except TimeoutError:
-                if self._model == MODEL_CANDELA and self._pair_result is None:
+                if self._model == MODEL_CANDELA and self._pair_answer() is None:
                     # Candela does not always answer, even with notifications
                     self._conn = Conn.PAIRED
                     return
                 raise YeelightPairingError(
                     "The lamp did not answer the pairing request"
-                    if self._pair_result is None
+                    if self._pair_answer() is None
                     else "The pairing button of the lamp was not pushed"
                 ) from None
             self._pair_resp_event.clear()
-            if self._pair_result != PAIR_REQUESTED:
+            if (answer := self._pair_answer()) != PAIR_REQUESTED:
                 break
             timeout = PAIR_BUTTON_TIMEOUT
 
-        if self._pair_result in (PAIR_SUCCESS, PAIR_ALREADY_PAIRED):
+        if answer in (PAIR_SUCCESS, PAIR_ALREADY_PAIRED):
             return
-        if self._pair_result == PAIR_NOT_PAIRED:
+        if answer == PAIR_NOT_PAIRED:
             raise YeelightPairingError("The lamp refused the pairing request")
         raise YeelightPairingError(
             "The pairing request returned unexpected results, reset the lamp"
@@ -392,9 +407,9 @@ class Lamp:
                         await self._ensure_connected()
                         assert self._client is not None
                         await self._write(self._client, bits)
-                except YeelightPairingError, YeelightConnectionError:
+                except (YeelightPairingError, YeelightConnectionError) as err:
                     await self._disconnect_client()
-                    self._set_available(False)
+                    self._set_available(False, str(err))
                     raise
                 except RETRY_EXCEPTIONS as err:
                     await self._disconnect_client()
@@ -407,7 +422,7 @@ class Lamp:
                         )
                         await asyncio.sleep(RETRY_DELAY)
                         continue
-                    self._set_available(False)
+                    self._set_available(False, repr(err))
                     raise YeelightError(
                         f"Communication with {self._mac} failed: {err!r}"
                     ) from err
@@ -424,6 +439,11 @@ class Lamp:
     @property
     def mac(self) -> str:
         return self._mac
+
+    @property
+    def ble_device(self) -> BLEDevice:
+        """The BLEDevice (adapter or proxy) used for the next connection."""
+        return self._ble_device
 
     @property
     def available(self) -> bool:
@@ -467,13 +487,6 @@ class Lamp:
     def color(self) -> tuple[int, int, int]:
         return self._rgb
 
-    def get_prop_min_max(self) -> dict[str, Any]:
-        return {
-            "brightness": {"min": 0, "max": 100},
-            "temperature": {"min": TEMP_MIN, "max": TEMP_MAX},
-            "color": {"min": 0, "max": 255},
-        }
-
     def restore_state(self, is_on: bool, brightness: int | None) -> None:
         """Restore the last known state for lamps without state feedback."""
         self._is_on = is_on
@@ -492,8 +505,6 @@ class Lamp:
         bits = struct.pack("BBB15x", COMMAND_STX, CMD_GETSTATE, CMD_GETSTATE_SEC)
         _LOGGER.debug("Send Cmd: Get_state")
         await self.send_cmd(bits, wait_notif=0.5)
-
-    get_state = update
 
     async def turn_on(self) -> None:
         """Turn the lamp on. (send back state through notif)"""
@@ -553,21 +564,6 @@ class Lamp:
         self._rgb = (red, green, blue)
         self._brightness = brightness
         self._mode = self.MODE_COLOR
-
-    async def get_name(self) -> None:
-        """Get the name from the lamp (through notif)"""
-        _LOGGER.debug("Send Cmd: Get_Name")
-        await self.send_cmd(struct.pack("BB16x", COMMAND_STX, CMD_GETNAME))
-
-    async def get_version(self) -> None:
-        """Get the versions from the lamp (through notif)"""
-        _LOGGER.debug("Send Cmd: Get_Version")
-        await self.send_cmd(struct.pack("BB16x", COMMAND_STX, CMD_GETVER))
-
-    async def get_serial(self) -> None:
-        """Get the serial from the lamp (through notif)"""
-        _LOGGER.debug("Send Cmd: Get_Serial")
-        await self.send_cmd(struct.pack("BB16x", COMMAND_STX, CMD_GETSERIAL))
 
     # ---- notifications ----
     def _notification_handler(self, _sender: Any, data: bytearray) -> None:
@@ -637,29 +633,9 @@ class Lamp:
 
         elif res_type == RES_GETVER:
             self.versions = struct.unpack("<xxBxHHHH6x", data)
-            _LOGGER.info("Lamp %s exposes versions:%s", self._mac, self.versions)
+            _LOGGER.debug("%s: versions %s", self._mac, self.versions)
             self.run_state_changed_cb()
 
         elif res_type == RES_GETSERIAL:
             self.serial = data[2]
-            _LOGGER.info("Lamp %s exposes serial:%s", self._mac, self.serial)
-
-    async def read_services(self) -> None:
-        """Log all services/characteristics (debugging helper, not used by HA)."""
-        if self._client is None:
-            return
-        for service in self._client.services:
-            _LOGGER.info("[Service] %s", service)
-            for char in service.characteristics:
-                value: Any = None
-                if "read" in char.properties:
-                    try:
-                        value = bytes(await self._client.read_gatt_char(char))
-                    except RETRY_EXCEPTIONS as err:
-                        value = err
-                _LOGGER.info(
-                    "__[Characteristic] %s (%s), Value: %s",
-                    char,
-                    ",".join(char.properties),
-                    value,
-                )
+            _LOGGER.debug("%s: serial %s", self._mac, self.serial)

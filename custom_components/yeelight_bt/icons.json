@@ -1,0 +1,12 @@
+{
+  "entity": {
+    "light": {
+      "bedside": {
+        "default": "mdi:lamp"
+      },
+      "candela": {
+        "default": "mdi:candle"
+      }
+    }
+  }
+}

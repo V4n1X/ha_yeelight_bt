@@ -12,14 +12,14 @@
       },
       "bluetooth_confirm": {
         "title": "Yeelight Bluetooth",
-        "description": "A Yeelight {model} was discovered ({address}). If the lamp pulses on the first connection, push its small button to finish pairing.",
+        "description": "A Yeelight {model} was discovered ({address}). Home Assistant connects to the lamp when you submit. If the lamp pulses, push its small button within 30 seconds to finish pairing.",
         "data": {
           "name": "Lamp name"
         }
       },
       "pick_device": {
         "title": "Yeelight Bluetooth",
-        "description": "Lamps seen by the Home Assistant bluetooth adapters and proxies. If the lamp pulses on the first connection, push its small button to finish pairing.",
+        "description": "Lamps seen by the Home Assistant bluetooth adapters and proxies. Home Assistant connects to the lamp when you submit. If the lamp pulses, push its small button within 30 seconds to finish pairing.",
         "data": {
           "mac": "Lamp",
           "name": "Lamp name"
@@ -27,22 +27,32 @@
       },
       "manual": {
         "title": "Yeelight Bluetooth",
-        "description": "Enter a name and the MAC address of the lamp. If the lamp pulses on the first connection, push its small button to finish pairing.",
+        "description": "Enter a name and the MAC address of the lamp. Home Assistant connects to the lamp when you submit. If the lamp pulses, push its small button within 30 seconds to finish pairing.",
         "data": {
           "name": "Lamp name",
           "mac": "MAC address",
           "model": "Model"
         }
+      },
+      "reconfigure": {
+        "title": "Reconfigure {name}",
+        "description": "Change the model of the lamp {address}. Select the model when it is not detected correctly.",
+        "data": {
+          "model": "Model"
+        }
       }
     },
     "error": {
-      "invalid_mac": "This is not a valid MAC address (format AA:BB:CC:DD:EE:FF)."
+      "invalid_mac": "This is not a valid MAC address (format AA:BB:CC:DD:EE:FF).",
+      "not_found": "Home Assistant does not see this lamp. Make sure it is powered and in range of a bluetooth adapter or proxy.",
+      "cannot_connect": "Could not connect to or pair with the lamp. Make sure it is not connected to the Yeelight app; if it pulses, push its button. Resetting the lamp may help."
     },
     "abort": {
       "already_configured": "This lamp is already configured.",
       "already_in_progress": "The configuration of this lamp is already in progress.",
       "not_supported": "This device is not a supported Yeelight lamp.",
-      "no_devices_found": "No unconfigured lamp found. Ensure the lamp is in range of a bluetooth adapter or proxy and not connected to another app. Resetting the lamp may help."
+      "no_devices_found": "No unconfigured lamp found. Ensure the lamp is in range of a bluetooth adapter or proxy and not connected to another app. Resetting the lamp may help.",
+      "reconfigure_successful": "The lamp was reconfigured."
     }
   },
   "selector": {
@@ -52,6 +62,12 @@
         "bedside": "Bedside",
         "candela": "Candela"
       }
+    }
+  },
+  "issues": {
+    "unknown_model": {
+      "title": "Model of {name} not detected",
+      "description": "The lamp {address} does not advertise its model, so the Bedside protocol is used. If this is a Candela, open the integration, select **Reconfigure** on {name} and choose the model."
     }
   },
   "exceptions": {

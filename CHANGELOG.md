@@ -6,6 +6,24 @@ First release of [V4n1X/ha_yeelight_bt](https://github.com/V4n1X/ha_yeelight_bt)
 
 Requires Home Assistant 2026.10 or newer, tested with 2026.10 and 2026.11.
 
+### ⚠️ Breaking change: real Kelvin
+
+The color temperature is no longer shifted: 1.x turned 2740 K in Home Assistant into about 4080 K on the lamp so that the middle of the slider looked white. 2.0 sends and reports the Kelvin value the lamp really uses (1700–6500 K, measured on hardware: 4080 K is neutral white). **Automations and scenes with a color temperature look different after the update**, use about 4000 K for neutral white.
+
+### Quality scale
+
+The integration follows the Home Assistant integration quality scale up to Platinum (see `quality_scale.yaml`):
+
+- The config flow connects to and pairs with the lamp before creating the entry (`test-before-configure`).
+- Reconfigure flow to change the model, repair issue when the model could not be detected.
+- Diagnostics download (lamp state, connection, adapter/proxy, signal strength).
+- Logs once when a lamp becomes unavailable and once when it is back.
+- Icon translations (lamp / candle icon per model).
+- Respects the "Enable polling" system option; `homeassistant.update_entity` refreshes on demand.
+- Schemas use Probatio, Home Assistant's validation engine since 2026.9, instead of voluptuous.
+- Fully typed (`mypy --strict`), test coverage 98 %.
+- Unused protocol helpers removed.
+
 ### Marketplace
 
 - Ready for the Home Assistant Marketplace (formerly HACS): brand images in the integration, `categories` in the manifest, HACS and hassfest validation in one workflow, release workflow that checks the version and attaches `yeelight_bt.zip`.

@@ -261,3 +261,24 @@ def test_short_or_unknown_notifications_ignored() -> None:
     lamp.handle_notification(b"\x43\x45")
     lamp.handle_notification(bytes(frame(COMMAND_STX, 0x99)))
     assert not lamp.is_on
+
+
+async def test_logs_once_when_unavailable_and_back(caplog, connector) -> None:
+    """log-when-unavailable: one info line each way, not one per failed poll."""
+    client = FakeLampClient()
+    connector(client)
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+    await lamp.update()
+
+    client.fail_writes = 100
+    client.is_connected = False
+    for _ in range(3):
+        lamp._last_connect_failure = 0
+        with pytest.raises(YeelightError):
+            await lamp.update()
+    client.fail_writes = 0
+    await lamp.update()
+
+    messages = [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
+    assert sum("is unavailable" in m for m in messages) == 1
+    assert sum("is available again" in m for m in messages) == 1

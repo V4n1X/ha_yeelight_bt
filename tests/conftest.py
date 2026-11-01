@@ -16,20 +16,27 @@ from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
 import pytest
 
 try:  # HA >= 2026.11 ships its own test package
-    from pytest_homeassistant.common import MockConfigEntry, mock_restore_cache
+    from pytest_homeassistant.common import (
+        MockConfigEntry,
+        async_fire_time_changed,
+        mock_restore_cache,
+    )
 except ImportError:
     from pytest_homeassistant_custom_component.common import (
         MockConfigEntry,
+        async_fire_time_changed,
         mock_restore_cache,
     )
 
 from custom_components.yeelight_bt import yeelightbt
 from custom_components.yeelight_bt.yeelightbt import (
+    CMD_GETSERIAL,
     CMD_GETSTATE,
     CMD_GETVER,
     CMD_PAIR,
     COMMAND_STX,
     PAIR_SUCCESS,
+    RES_GETSERIAL,
     RES_GETSTATE,
     RES_GETVER,
     RES_PAIR,
@@ -38,7 +45,7 @@ from custom_components.yeelight_bt.yeelightbt import (
 BEDSIDE_ADDRESS = "F8:24:41:E6:3E:39"
 CANDELA_ADDRESS = "F8:24:41:C0:0E:D2"
 
-__all__ = ["MockConfigEntry", "mock_restore_cache"]
+__all__ = ["MockConfigEntry", "async_fire_time_changed", "mock_restore_cache"]
 
 
 @pytest.fixture(autouse=True)
@@ -51,8 +58,8 @@ def fast_timings() -> Generator[None]:
     """Remove the waits meant for real lamps."""
     with (
         patch.object(yeelightbt, "PAIR_GRACE_PERIOD", 0),
-        patch.object(yeelightbt, "PAIR_RESPONSE_TIMEOUT", 0.1),
-        patch.object(yeelightbt, "PAIR_BUTTON_TIMEOUT", 0.3),
+        patch.object(yeelightbt, "PAIR_RESPONSE_TIMEOUT", 1.0),
+        patch.object(yeelightbt, "PAIR_BUTTON_TIMEOUT", 1.0),
         patch.object(yeelightbt, "RETRY_DELAY", 0),
         patch("custom_components.yeelight_bt.light.POWER_ON_DELAY", 0),
         patch("custom_components.yeelight_bt.light.TRANSITION_DELAY", 0),
@@ -144,6 +151,8 @@ class FakeLampClient:
                 )
         elif data[1] == CMD_GETSTATE:
             loop.call_soon(self._handler, None, self.state)
+        elif data[1] == CMD_GETSERIAL:
+            loop.call_soon(self._handler, None, frame(COMMAND_STX, RES_GETSERIAL, 7))
         elif data[1] == CMD_GETVER:
             loop.call_soon(
                 self._handler,
@@ -174,6 +183,9 @@ class FakeConnector:
         if client in self.connections:
             client.is_connected = True
         client.disconnected_callback = kwargs.get("disconnected_callback")
+        # like bleak-retry-connector, ask for the newest BLEDevice
+        if (ble_device_callback := kwargs.get("ble_device_callback")) is not None:
+            ble_device_callback()
         self.connections.append(client)
         return client
 

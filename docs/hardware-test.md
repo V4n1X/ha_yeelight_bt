@@ -75,7 +75,17 @@ Same lamp, Home Assistant OS 2026.10.4 (the maintainer's production instance, af
 | Reload of the config entry | OK |
 | Log | no entries of `yeelight_bt` during all tests |
 
-Not tested yet: in-place entity ID change (needs HA 2026.11), long run over several hours, delete and re-add of the entry, migration from HACS.
+After switching to real Kelvin and the quality scale changes (same instance):
+
+| Check | Result |
+| --- | --- |
+| `color_temp_kelvin: 4000` | lamp and dashboard both neutral white; HA reports 4000 K |
+| Reconfigure flow | opens with name and address (closed without change) |
+| Diagnostics | lamp state, firmware and the ESPHome proxy used for the connection |
+| Repair issues | none (model known) |
+| HA restart | lamp available with the right state |
+
+Not tested yet: in-place entity ID change (needs HA 2026.11), long run over several hours, delete and re-add of the entry (connection test in the config flow), migration from HACS.
 
 ## Candela
 

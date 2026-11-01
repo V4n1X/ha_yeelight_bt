@@ -9,6 +9,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_MAC, EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import issue_registry as ir
 
 from .const import CONF_MODEL, DOMAIN
 from .yeelightbt import MODEL_UNKNOWN, MODELS, Lamp, model_from_name
@@ -51,10 +52,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: YeelightBTConfigEntry) -
             )
         else:
             _LOGGER.warning(
-                "Could not detect the model of %s, using the Bedside protocol."
-                " Re-add the lamp and select the model to fix this",
+                "Could not detect the model of %s, using the Bedside protocol",
                 address,
             )
+    _async_update_model_issue(hass, entry, model)
 
     lamp = Lamp(
         ble_device,
@@ -91,6 +92,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: YeelightBTConfigEntry) -
     entry.runtime_data = lamp
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
+
+
+@callback
+def _async_update_model_issue(
+    hass: HomeAssistant, entry: YeelightBTConfigEntry, model: str | None
+) -> None:
+    """Ask the user to pick the model when it could not be detected."""
+    issue_id = f"unknown_model_{entry.entry_id}"
+    if model in MODELS:
+        ir.async_delete_issue(hass, DOMAIN, issue_id)
+        return
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        issue_id,
+        is_fixable=False,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key="unknown_model",
+        translation_placeholders={"name": entry.title, "address": entry.data[CONF_MAC]},
+    )
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: YeelightBTConfigEntry) -> None:
+    """Clean up when the lamp is removed."""
+    ir.async_delete_issue(hass, DOMAIN, f"unknown_model_{entry.entry_id}")
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: YeelightBTConfigEntry) -> bool:
