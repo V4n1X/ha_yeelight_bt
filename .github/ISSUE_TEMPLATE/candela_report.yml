@@ -1,0 +1,58 @@
+name: Candela test report
+description: Tell us how the Yeelight Candela works for you (working or not)
+title: "[Candela] <adapter / proxy> - <works / problem>"
+labels: [candela]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The maintainer has no Candela, so its support relies on your reports. Reports that everything works are just as welcome!
+  - type: input
+    id: integration_version
+    attributes:
+      label: Integration version
+      placeholder: ex. v2.0.0
+    validations:
+      required: true
+  - type: input
+    id: ha_version
+    attributes:
+      label: Home Assistant version
+      placeholder: ex. 2026.11.0
+    validations:
+      required: true
+  - type: dropdown
+    id: bluetooth_connection
+    attributes:
+      label: Bluetooth connection
+      options:
+        - Local bluetooth adapter (BlueZ)
+        - ESPHome bluetooth proxy
+        - Shelly bluetooth proxy
+        - Other
+    validations:
+      required: true
+  - type: checkboxes
+    id: results
+    attributes:
+      label: What works?
+      options:
+        - label: The lamp was discovered automatically
+        - label: Pairing worked (lamp pulsed / button pushed / nothing needed)
+        - label: Turn on
+        - label: Turn off
+        - label: Brightness
+        - label: The state stays correct after using the lamp's own button
+        - label: Works again after a Home Assistant restart
+        - label: The entity shows "assumed state" (lightning buttons instead of a toggle)
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Anything that did not work, or behaved strangely.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Debug log
+      description: Optional, but very helpful when something does not work.
+      render: text

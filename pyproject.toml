@@ -1,13 +1,28 @@
-[tool.isort]
-profile = "black"
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+# Let Home Assistant install its httpx alias before respx is imported (HA >= 2026.11)
+addopts = "-p no:respx"
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "ASYNC"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+force-sort-within-sections = true
+known-first-party = ["custom_components"]
+combine-as-imports = true
 
 [tool.mypy]
 check_untyped_defs = true
-disallow_any_generics = true
 disallow_incomplete_defs = true
-disallow_untyped_defs = true
 mypy_path = "custom_components/yeelight_bt"
 no_implicit_optional = true
 show_error_codes = true
 warn_unreachable = true
-warn_unused_ignores = true

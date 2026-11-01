@@ -1,17 +1,27 @@
-name: Validate with hacs
+name: Validate
 
 on:
   push:
   pull_request:
   schedule:
     - cron: "0 0 * * *"
+  workflow_dispatch:
+
+permissions: {}
 
 jobs:
-  validate:
+  validate-hacs:
+    name: HACS / Marketplace
     runs-on: "ubuntu-latest"
     steps:
-      - uses: "actions/checkout@v2"
       - name: HACS validation
         uses: "hacs/action@main"
         with:
           category: "integration"
+
+  validate-hassfest:
+    name: Hassfest
+    runs-on: "ubuntu-latest"
+    steps:
+      - uses: "actions/checkout@v4"
+      - uses: "home-assistant/actions/hassfest@master"

@@ -1,328 +1,335 @@
-""" light platform """
+"""Light platform for Yeelight bluetooth lamps."""
+
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta
 import logging
-from typing import TYPE_CHECKING, Any
+import math
+from typing import Any
 
-import homeassistant.helpers.config_validation as cv
-import voluptuous as vol
-from homeassistant.components.light import (  # ATTR_EFFECT,; SUPPORT_EFFECT,
+from homeassistant.components import bluetooth
+from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_TEMP_KELVIN,
     ATTR_HS_COLOR,
-    ENTITY_ID_FORMAT,
-    PLATFORM_SCHEMA,
-    LightEntity,
-    LightEntityFeature,
     ColorMode,
+    LightEntity,
 )
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_MAC, CONF_NAME, EVENT_HOMEASSISTANT_STOP
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import generate_entity_id
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.util.color import color_hs_to_RGB, color_RGB_to_hs
+from homeassistant.const import STATE_ON
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.event import async_call_later, async_track_time_interval
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util.color import (
-    color_temperature_kelvin_to_mired as kelvin_to_mired,
-)
-from homeassistant.util.color import (
-    color_temperature_mired_to_kelvin as mired_to_kelvin,
+    brightness_to_value,
+    color_hs_to_RGB,
+    color_RGB_to_hs,
+    value_to_brightness,
 )
 
+from . import YeelightBTConfigEntry
 from .const import DOMAIN
-from .yeelightbt import MODEL_CANDELA, BleakError, Lamp
-
-if TYPE_CHECKING:
-    from bleak.backends.device import BLEDevice
-
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
-    {
-        vol.Required(CONF_MAC): cv.string,
-        vol.Optional(CONF_NAME, default=DOMAIN): cv.string,
-    }
-)
-
-LIGHT_EFFECT_LIST = ["flow", "none"]
+from .yeelightbt import MODEL_CANDELA, TEMP_MAX, TEMP_MIN, Lamp, YeelightError
 
 _LOGGER = logging.getLogger(__name__)
+
+# State is pushed by the lamp, polling is done by the entity itself so that a
+# slow (re)connection through a proxy never blocks HA's update loop.
+PARALLEL_UPDATES = 0
+UPDATE_INTERVAL = timedelta(seconds=30)
+UPDATE_TIMEOUT = 120
+RECONNECT_DELAY = 5
+# Pause between powering on and a follow-up command, the lamp ignores
+# commands while it is still powering on.
+POWER_ON_DELAY = 0.5
+# Lamps stop their transition when they receive a command, so give the
+# transition some time before HA sends the next one.
+TRANSITION_DELAY = 0.7
+
+BRIGHTNESS_SCALE = (1, 100)
+# the temp HA wants to set at when clicking on white in UI
+HA_WHITE_TEMP = 2740
+# the temp that correspond to true white on the lamp
+LAMP_WHITE_TEMP = 4080
 
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    config_entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    entry: YeelightBTConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up the platform from config_entry."""
-    _LOGGER.debug(
-        f"light async_setup_entry: setting up the config entry {config_entry.title} "
-        f"with data:{config_entry.data}"
-    )
-    name = config_entry.data.get(CONF_NAME) or DOMAIN
-    ble_device = hass.data[DOMAIN][config_entry.entry_id]
-
-    entity = YeelightBT(name, ble_device)
-    async_add_entities([entity])
+    """Set up the light from a config entry."""
+    async_add_entities([YeelightBT(entry.runtime_data, entry.title)])
 
 
-class YeelightBT(LightEntity):
-    """Representation of a light."""
+def scale_temp(temp: int) -> int:
+    """Scale the temperature so that the white in HA UI correspond to the
+    white on the lamp!"""
+    a, b = TEMP_MIN, TEMP_MAX
+    mid, white = HA_WHITE_TEMP, LAMP_WHITE_TEMP
+    temp = min(b, max(a, int(temp)))
+    if temp < mid:
+        new_temp = (white - a) / (mid - a) * temp + a * (mid - white) / (mid - a)
+    else:
+        new_temp = (b - white) / (b - mid) * temp + b * (white - mid) / (b - mid)
+    return round(new_temp)
 
-    def __init__(self, name: str, ble_device: BLEDevice) -> None:
+
+def scale_temp_reversed(temp: int) -> int:
+    """Reverse the scale to match HA UI"""
+    a, b = TEMP_MIN, TEMP_MAX
+    mid, white = HA_WHITE_TEMP, LAMP_WHITE_TEMP
+    temp = min(b, max(a, int(temp)))
+    if temp < white:
+        new_temp = (mid - a) / (white - a) * temp - a * (mid - white) / (white - a)
+    else:
+        new_temp = (b - mid) / (b - white) * temp - b * (white - mid) / (b - white)
+    return round(new_temp)
+
+
+class YeelightBT(LightEntity, RestoreEntity):
+    """Representation of a Yeelight bluetooth lamp."""
+
+    _attr_has_entity_name = True
+    _attr_name = None
+    _attr_should_poll = False
+    _attr_min_color_temp_kelvin = TEMP_MIN
+    _attr_max_color_temp_kelvin = TEMP_MAX
+
+    def __init__(self, lamp: Lamp, name: str) -> None:
         """Initialize the light."""
-        self._name = name
-        self._mac = ble_device.address
-        self.entity_id = generate_entity_id(ENTITY_ID_FORMAT, self._name, [])
-        self._is_on = False
-        self._rgb = (0, 0, 0)
-        self._ct = 0
-        self._brightness = 0
-        self._effect_list = LIGHT_EFFECT_LIST
-        self._effect = "none"
-        self._available = False
-
-        _LOGGER.info(f"Initializing YeelightBT Entity: {self.name}, {self._mac}")
-        self._dev = Lamp(ble_device)
-        self._dev.add_callback_on_state_changed(self._status_cb)
-        self._prop_min_max = self._dev.get_prop_min_max()
-        self._attr_min_color_temp_kelvin = self._prop_min_max["temperature"]["min"]
-        self._attr_max_color_temp_kelvin = self._prop_min_max["temperature"]["max"]
+        self._dev = lamp
+        self._device_name = name
+        self._attr_unique_id = lamp.mac
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, lamp.mac)},
+            connections={(CONNECTION_BLUETOOTH, lamp.mac)},
+            name=name,
+            manufacturer="Yeelight",
+            model=lamp.model,
+        )
+        if lamp.model == MODEL_CANDELA:
+            self._attr_supported_color_modes = {ColorMode.BRIGHTNESS}
+        else:
+            self._attr_supported_color_modes = {ColorMode.COLOR_TEMP, ColorMode.HS}
+        self._update_task: asyncio.Task[None] | None = None
+        self._unsub_reconnect: Any = None
+        self._sw_version: str | None = None
 
     async def async_added_to_hass(self) -> None:
         """Run when entity about to be added to hass."""
+        await super().async_added_to_hass()
+        self.async_on_remove(self._dev.add_callback_on_state_changed(self._status_cb))
         self.async_on_remove(
-            self.hass.bus.async_listen_once(
-                EVENT_HOMEASSISTANT_STOP, self.async_will_remove_from_hass
+            async_track_time_interval(
+                self.hass, self._async_interval_update, UPDATE_INTERVAL
             )
         )
-        # schedule immediate refresh of lamp state:
-        self.async_schedule_update_ha_state(force_refresh=True)
+        self.async_on_remove(self._cancel_tasks)
 
-    async def async_will_remove_from_hass(self, event=None) -> None:
-        """Run when entity will be removed from hass."""
-        _LOGGER.debug("Running async_will_remove_from_hass")
-        try:
-            await self._dev.disconnect()
-        except BleakError:
-            _LOGGER.debug(
-                f"Exception disconnecting from {self._dev._mac}", exc_info=True
+        if self._dev.model == MODEL_CANDELA and (
+            last_state := await self.async_get_last_state()
+        ):
+            # The Candela rarely reports its state, start from the last known one
+            brightness = last_state.attributes.get(ATTR_BRIGHTNESS)
+            self._dev.restore_state(
+                last_state.state == STATE_ON,
+                self._to_lamp_brightness(brightness) if brightness else None,
             )
+        self._schedule_update()
 
-    @property
-    def device_info(self) -> dict[str, Any]:
-        # TODO: replace with _attr
-        prop = {
-            "identifiers": {
-                # Serial numbers are unique identifiers within a specific domain
-                (DOMAIN, self.unique_id)
-            },
-            "name": self._name,
-            "manufacturer": "Yeelight",
-            "model": self._dev.model,
-        }
-        if self._dev.versions:
-            prop.update({"sw_version": "-".join(map(str, self._dev.versions[1:4]))})
-        return prop
+    @callback
+    def async_entity_id_changed(self, old_entity_id: str) -> None:
+        """Opt in to in-place entity_id changes (HA 2026.11+)."""
+        if (parent := getattr(super(), "async_entity_id_changed", None)) is not None:
+            parent(old_entity_id)
 
-    @property
-    def unique_id(self) -> str:
-        # TODO: replace with _attr
-        """Return the unique id of the light."""
-        return self._mac
+    @callback
+    def _cancel_tasks(self) -> None:
+        if self._unsub_reconnect is not None:
+            self._unsub_reconnect()
+            self._unsub_reconnect = None
+        if self._update_task is not None:
+            self._update_task.cancel()
+            self._update_task = None
+
+    @callback
+    def _async_interval_update(self, _now: datetime) -> None:
+        self._schedule_update()
+
+    @callback
+    def _schedule_update(self, _now: datetime | None = None) -> None:
+        """Request the lamp state, unless a request is already running."""
+        self._unsub_reconnect = None
+        if self._update_task is not None and not self._update_task.done():
+            return
+        self._update_task = self.hass.async_create_background_task(
+            self._async_update_lamp(), f"{DOMAIN} update {self._dev.mac}"
+        )
+
+    async def _async_update_lamp(self) -> None:
+        try:
+            async with asyncio.timeout(UPDATE_TIMEOUT):
+                await self._dev.update()
+        except YeelightError as err:
+            _LOGGER.debug("Updating %s failed: %s", self._dev.mac, err)
+        except TimeoutError:
+            _LOGGER.debug("Updating %s timed out", self._dev.mac)
+
+    @callback
+    def _status_cb(self) -> None:
+        _LOGGER.debug("Got state notification from the lamp")
+        if (
+            not self._dev.is_connected
+            and self._dev.available
+            and self._dev.has_state_feedback
+            and self._unsub_reconnect is None
+        ):
+            # Reconnect soon, so state changes made on the lamp are seen
+            self._unsub_reconnect = async_call_later(
+                self.hass, RECONNECT_DELAY, self._schedule_update
+            )
+        self._update_sw_version()
+        self.async_write_ha_state()
+
+    @callback
+    def _update_sw_version(self) -> None:
+        if not self._dev.versions:
+            return
+        sw_version = "-".join(map(str, self._dev.versions[1:4]))
+        if sw_version == self._sw_version:
+            return
+        self._sw_version = sw_version
+        if self.device_entry is not None:
+            dr.async_get(self.hass).async_update_device(
+                self.device_entry.id, sw_version=sw_version
+            )
 
     @property
     def available(self) -> bool:
-        return self._available
+        if self._dev.contacted:
+            return self._dev.available
+        # Not contacted yet, allow control as long as HA can see the lamp
+        return bluetooth.async_address_present(
+            self.hass, self._dev.mac, connectable=True
+        )
 
     @property
-    def should_poll(self) -> bool:
-        """Polling needed for a updating status."""
-        return True
-
-    @property
-    def name(self) -> str:
-        """Return the name of the light if any."""
-        return self._name
-
-    @property
-    def min_color_temp_kelvin(self) -> int:
-        """Return the minimum supported color temperature in Kelvin."""
-        return self._attr_min_color_temp_kelvin
-
-    @property
-    def max_color_temp_kelvin(self) -> int:
-        """Return the maximum supported color temperature in Kelvin."""
-        return self._attr_max_color_temp_kelvin
-
-    @property
-    def brightness(self) -> int:
-        """Return the brightness of this light between 0..255."""
-        return self._brightness
-
-    @property
-    def hs_color(self) -> tuple[Any]:
-        """
-        Return the Hue and saturation color value.
-        Lamp has rgb => we calculate hs
-        """
-        return color_RGB_to_hs(*self._rgb)
-
-    @property
-    def color_temp(self) -> int:
-        """Return the CT color temperature in Kelvin."""
-        return self._attr_color_temp_kelvin
-
-    # @property
-    # def effect_list(self):
-    #     """Return the list of supported effects."""
-    #     return self._effect_list
-
-    # @property
-    # def effect(self):
-    #     """Return the current effect."""
-    #     return self._effect
+    def assumed_state(self) -> bool:
+        """The state is assumed when the lamp sends no notifications."""
+        return self._dev.has_state_feedback is False
 
     @property
     def is_on(self) -> bool:
         """Return true if light is on."""
-        return self._is_on
+        return self._dev.is_on
 
     @property
-    def supported_color_modes(self) -> set[str]:
-        """Return the supported color modes."""
-        if self._dev.model == MODEL_CANDELA:
-            return {ColorMode.BRIGHTNESS}
-        return {ColorMode.COLOR_TEMP, ColorMode.HS}
-    
+    def brightness(self) -> int | None:
+        """Return the brightness of this light between 0..255."""
+        if self._dev.brightness <= 0:
+            return None
+        return value_to_brightness(BRIGHTNESS_SCALE, self._dev.brightness)
+
     @property
-    def supported_features(self) -> int:
-        """Return the supported features using LightEntityFeature."""
-        return LightEntityFeature.TRANSITION | LightEntityFeature.EFFECT
-        
-    @property
-    def color_mode(self) -> str:
+    def color_mode(self) -> ColorMode:
         """Return the current color mode of the light."""
-        if self._ct > 0:
-            return ColorMode.COLOR_TEMP
-        return ColorMode.HS        
-
-    def _status_cb(self) -> None:
-        _LOGGER.debug("Got state notification from the lamp")
-        self._available = self._dev.available
-        if not self._available:
-            self.async_write_ha_state()
-            return
-
-        self._brightness = int(round(255.0 * self._dev.brightness / 100))
-        self._is_on = self._dev.is_on
+        if self._dev.model == MODEL_CANDELA:
+            return ColorMode.BRIGHTNESS
         if self._dev.mode == self._dev.MODE_WHITE:
-            self._attr_color_temp_kelvin = int(self.scale_temp_reversed(self._dev.temperature))
-            self._rgb = (0, 0, 0)
-        else:
-            self._ct = 0
-            self._rgb = self._dev.color
-        self.async_write_ha_state()
+            return ColorMode.COLOR_TEMP
+        return ColorMode.HS
 
-    async def async_update(self) -> None:
-        # Note, update should only start fetching,
-        # followed by asynchronous updates through notifications.
-        try:
-            _LOGGER.debug("Requesting an update of the lamp status")
-            await self._dev.get_state()
-        except Exception as ex:
-            _LOGGER.error(f"Fail requesting the light status. Got exception: {ex}")
-            _LOGGER.debug("Yeelight_BT trace:", exc_info=True)
+    @property
+    def hs_color(self) -> tuple[float, float] | None:
+        """
+        Return the Hue and saturation color value.
+        Lamp has rgb => we calculate hs
+        """
+        if self.color_mode != ColorMode.HS:
+            return None
+        return color_RGB_to_hs(*self._dev.color)
 
-    async def async_turn_on(self, **kwargs: int) -> None:
+    @property
+    def color_temp_kelvin(self) -> int | None:
+        """Return the CT color temperature in Kelvin."""
+        if self.color_mode != ColorMode.COLOR_TEMP or not self._dev.temperature:
+            return None
+        return min(TEMP_MAX, max(TEMP_MIN, scale_temp_reversed(self._dev.temperature)))
+
+    @staticmethod
+    def _to_lamp_brightness(brightness: int) -> int:
+        return min(
+            100, max(1, math.ceil(brightness_to_value(BRIGHTNESS_SCALE, brightness)))
+        )
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the light on."""
-        _LOGGER.debug(f"Trying to turn on. with ATTR:{kwargs}")
+        _LOGGER.debug("Trying to turn on. with ATTR:%s", kwargs)
 
         # First if brightness of dev to 0: turn off
         if ATTR_BRIGHTNESS in kwargs:
-            brightness = kwargs[ATTR_BRIGHTNESS]
-            if brightness == 0:
-                _LOGGER.debug("Lamp brightness to be set to 0... so turning off")
+            if kwargs[ATTR_BRIGHTNESS] == 0:
                 await self.async_turn_off()
                 return
+            brightness: int | None = self._to_lamp_brightness(kwargs[ATTR_BRIGHTNESS])
         else:
-            brightness = self._brightness
-        brightness_dev = int(round(brightness * 1.0 / 255 * 100))
+            brightness = self._dev.brightness or None
 
+        try:
+            await self._async_turn_on(kwargs, brightness)
+        except YeelightError as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="command_failed",
+                translation_placeholders={"name": self._device_name},
+            ) from err
+        finally:
+            self.async_write_ha_state()
+
+    async def _async_turn_on(
+        self, kwargs: dict[str, Any], brightness: int | None
+    ) -> None:
         # ATTR cannot be set while light is off, so turn it on first
-        if not self._is_on:
+        if not self._dev.is_on or self.assumed_state:
             await self._dev.turn_on()
-            if any(
-                keyword in kwargs
-                for keyword in (ATTR_HS_COLOR, ATTR_COLOR_TEMP_KELVIN, ATTR_BRIGHTNESS)
+            if not any(
+                attr in kwargs
+                for attr in (ATTR_HS_COLOR, ATTR_COLOR_TEMP_KELVIN, ATTR_BRIGHTNESS)
             ):
-                await asyncio.sleep(0.5)  # wait for the lamp to turn on
-        self._is_on = True
+                return
+            await asyncio.sleep(POWER_ON_DELAY)
 
         if ATTR_HS_COLOR in kwargs and ColorMode.HS in self.supported_color_modes:
-            rgb: tuple[int, int, int] = color_hs_to_RGB(*kwargs.get(ATTR_HS_COLOR))
-            self._rgb = rgb
-            _LOGGER.debug(
-                f"Trying to set color RGB:{rgb} with brighntess:{brightness_dev}"
+            red, green, blue = color_hs_to_RGB(*kwargs[ATTR_HS_COLOR])
+            await self._dev.set_color(red, green, blue, brightness=brightness or 100)
+        elif (
+            ATTR_COLOR_TEMP_KELVIN in kwargs
+            and ColorMode.COLOR_TEMP in self.supported_color_modes
+        ):
+            await self._dev.set_temperature(
+                scale_temp(kwargs[ATTR_COLOR_TEMP_KELVIN]),
+                brightness=brightness or 100,
             )
-            await self._dev.set_color(*rgb, brightness=brightness_dev)
-            # assuming new state before lamp update comes through:
-            self._brightness = brightness_dev
-            await asyncio.sleep(0.7)  # give time to transition before HA request update
+        elif ATTR_BRIGHTNESS in kwargs and brightness is not None:
+            await self._dev.set_brightness(brightness)
+        else:
             return
+        await asyncio.sleep(TRANSITION_DELAY)
 
-        if ATTR_COLOR_TEMP_KELVIN in kwargs and ColorMode.COLOR_TEMP in self.supported_color_modes:
-            temp_in_k = kwargs[ATTR_COLOR_TEMP_KELVIN]
-            scaled_temp_in_k = self.scale_temp(temp_in_k)
-            _LOGGER.debug(
-                f"Trying to set temp:{scaled_temp_in_k} with brightness:{brightness_dev}"
-            )
-            await self._dev.set_temperature(scaled_temp_in_k, brightness=brightness_dev)
-            self._attr_color_temp_kelvin = temp_in_k
-            # assuming new state before lamp update comes through:
-            self._brightness = brightness_dev
-            await asyncio.sleep(0.7)  # give time to transition before HA request update
-            return
-
-        if ATTR_BRIGHTNESS in kwargs:
-            _LOGGER.debug(f"Trying to set brightness: {brightness_dev}")
-            await self._dev.set_brightness(brightness_dev)
-            # assuming new state before lamp update comes through:
-            self._brightness = int(round(float(brightness_dev) * 2.55))
-            await asyncio.sleep(0.7)  # give time to transition before HA request update
-            return
-
-        # if ATTR_EFFECT in kwargs:
-        #    self._effect = kwargs[ATTR_EFFECT]
-
-    async def async_turn_off(self, **kwargs: int) -> None:
+    async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the light off."""
-
-        await self._dev.turn_off()
-        self._is_on = False
-
-    def scale_temp(self, temp: int) -> int:
-        """Scale the temperature so that the white in HA UI correspond to the
-        white on the lamp!"""
-        a = self._prop_min_max["temperature"]["min"]
-        b = self._prop_min_max["temperature"]["max"]
-        mid = 2740  # the temp HA wants to set at when cliking on white in UI
-        white = 4080  # the temp that correspond to true white on the lamp
-
-        if temp < mid:
-            new_temp = (white - a) / (mid - a) * temp + a * (mid - white) / (mid - a)
-        else:
-            new_temp = (b - white) / (b - mid) * temp + b * (white - mid) / (b - mid)
-        return round(new_temp)
-
-    def scale_temp_reversed(self, temp: int) -> int:
-        """Reverse the scale to match HA UI"""
-        a = self._prop_min_max["temperature"]["min"]
-        b = self._prop_min_max["temperature"]["max"]
-        mid = 2740
-        white = 4080
-
-        if temp < white:
-            new_temp = (mid - a) / (white - a) * temp - a * (mid - white) / (white - a)
-        else:
-            new_temp = (b - mid) / (b - white) * temp - b * (white - mid) / (b - white)
-        return round(new_temp)
+        try:
+            await self._dev.turn_off()
+        except YeelightError as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="command_failed",
+                translation_placeholders={"name": self._device_name},
+            ) from err
+        finally:
+            self.async_write_ha_state()

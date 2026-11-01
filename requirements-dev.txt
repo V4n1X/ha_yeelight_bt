@@ -1,7 +1,9 @@
-# requirements for development
-pre-commit
-# optional for live feedback in IDE
-black
-mypy
-flake8
-isort
+# requirements for development and tests
+# HA >= 2026.11 ships its own test package (pytest-home-assistant), switch to
+# it once it is published; the tests work with both.
+pytest-homeassistant-custom-component
+# requirements of the HA bluetooth/usb integrations used in the tests
+aiousbwatcher
+pyudev
+serialx
+ruff

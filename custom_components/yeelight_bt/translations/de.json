@@ -1,0 +1,68 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "title": "Yeelight Bluetooth",
+        "description": "Steuere eine Yeelight Bedside- oder Candela-Bluetooth-Lampe. Die Lampe darf nicht mit der Yeelight-App oder einem anderen Gerät verbunden sein.",
+        "menu_options": {
+          "pick_device": "Gefundene Lampe auswählen",
+          "manual": "MAC-Adresse manuell eingeben"
+        }
+      },
+      "bluetooth_confirm": {
+        "title": "Yeelight Bluetooth",
+        "description": "Eine Yeelight {model} wurde gefunden ({address}). Falls die Lampe bei der ersten Verbindung pulsiert, drücke ihre kleine Taste, um das Pairing abzuschließen.",
+        "data": {
+          "name": "Name der Lampe"
+        }
+      },
+      "pick_device": {
+        "title": "Yeelight Bluetooth",
+        "description": "Lampen, die von den Bluetooth-Adaptern und -Proxys von Home Assistant gesehen werden. Falls die Lampe bei der ersten Verbindung pulsiert, drücke ihre kleine Taste, um das Pairing abzuschließen.",
+        "data": {
+          "mac": "Lampe",
+          "name": "Name der Lampe"
+        }
+      },
+      "manual": {
+        "title": "Yeelight Bluetooth",
+        "description": "Gib einen Namen und die MAC-Adresse der Lampe ein. Falls die Lampe bei der ersten Verbindung pulsiert, drücke ihre kleine Taste, um das Pairing abzuschließen.",
+        "data": {
+          "name": "Name der Lampe",
+          "mac": "MAC-Adresse",
+          "model": "Modell"
+        }
+      }
+    },
+    "error": {
+      "invalid_mac": "Keine gültige MAC-Adresse (Format AA:BB:CC:DD:EE:FF)."
+    },
+    "abort": {
+      "already_configured": "Diese Lampe ist bereits eingerichtet.",
+      "already_in_progress": "Die Einrichtung dieser Lampe läuft bereits.",
+      "not_supported": "Dieses Gerät ist keine unterstützte Yeelight-Lampe.",
+      "no_devices_found": "Keine nicht eingerichtete Lampe gefunden. Die Lampe muss in Reichweite eines Bluetooth-Adapters oder -Proxys sein und darf nicht mit einer anderen App verbunden sein. Ein Zurücksetzen der Lampe kann helfen."
+    }
+  },
+  "selector": {
+    "model": {
+      "options": {
+        "auto": "Automatisch erkennen",
+        "bedside": "Bedside",
+        "candela": "Candela"
+      }
+    }
+  },
+  "exceptions": {
+    "no_scanner": {
+      "message": "Kein Bluetooth-Scanner gefunden. Aktiviere die Bluetooth-Integration oder richte einen ESPHome-Bluetooth-Proxy ein."
+    },
+    "device_not_found": {
+      "message": "Die Yeelight-Lampe mit der Adresse {address} wurde nicht gefunden."
+    },
+    "command_failed": {
+      "message": "Der Befehl konnte nicht an {name} gesendet werden."
+    }
+  }
+}

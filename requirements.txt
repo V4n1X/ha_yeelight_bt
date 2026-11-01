@@ -1,3 +1,0 @@
-# project requirements
-bleak>=0.18.0
-bleak-retry-connector>=2.1.3

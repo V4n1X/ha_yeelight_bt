@@ -1,126 +1,167 @@
-> **Warning**
-> The bluetooth landscape in HA is currently evolving and at the moment there still seem to be some issues with Candela.
-> Current status:
->
-> - For HA prior to 2022.7.0 => use release v0.11.3
-> - For HA 2022.7.0 => use release v1.0.1 (Candela does not seem to work)
-> - For HA 2022.8.0+ => v1.1.0+ is compatible with and without the bluetooth integration (Candela is still WIP)
-> - For HA 2022.9.0+ => v1.2.1+ is compatible with and without the bluetooth integration (Candela still not working)
-> - For HA 2022.10.0+ => v1.2.2+ is compatible with the bluetooth integration and with esp bluetooth proxy (Candela control may work?)
+<img src="custom_components/yeelight_bt/brand/icon.png" alt="Yeelight Bluetooth" width="96" align="right">
 
-# Home Assistant custom component for Yeelight Bedside lamp
+# Yeelight Bluetooth for Home Assistant
 
-This is a custom component for Home Assistant that allows the control of the Yeelight bedside Lamp via bluetooth. (Contrary to the wifi version, those lamps only have bluetooth control).
+[![Release](https://img.shields.io/github/v/release/V4n1X/ha_yeelight_bt)](https://github.com/V4n1X/ha_yeelight_bt/releases)
+[![Validate](https://github.com/V4n1X/ha_yeelight_bt/actions/workflows/validate.yml/badge.svg)](https://github.com/V4n1X/ha_yeelight_bt/actions/workflows/validate.yml)
+[![Tests](https://github.com/V4n1X/ha_yeelight_bt/actions/workflows/tests.yml/badge.svg)](https://github.com/V4n1X/ha_yeelight_bt/actions/workflows/tests.yml)
+[![License](https://img.shields.io/github/license/V4n1X/ha_yeelight_bt)](LICENSE)
+
+Control the **Yeelight Bedside lamp** and the **Yeelight Candela** from Home Assistant. These lamps have no Wi-Fi and are controlled via Bluetooth Low Energy only, through a local Bluetooth adapter or a Bluetooth proxy (ESPHome, Shelly, …).
 
 ![Yeelight Bedside](yeelight-bedside.jpg)
 
-# Installation
+- Automatic discovery, set up from the UI
+- Works with local adapters and Bluetooth proxies, follows the best one automatically
+- On/off, brightness, color and color temperature (Bedside)
+- Robust against dropped connections: commands are retried once, failures are reported to automations
+- English and German translations
 
-This custom component can be installed in two different ways: `manually` or `using HACS`
+## Contents
 
-## 1. Installation using HACS (recommended)
+- [Supported lamps](#supported-lamps)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Setup](#setup)
+- [How it works](#how-it-works)
+- [Troubleshooting](#troubleshooting)
+- [Migrating from hcoohb/hass-yeelightbt](#migrating-from-hcoohbhass-yeelightbt)
+- [Contributing](#contributing)
+- [Credits and license](#credits-and-license)
 
-This repo is now in [HACS](https://hacs.xyz/).
+## Supported lamps
 
-1. Install HACS follow the instructions [here](https://hacs.xyz/docs/setup/prerequisites)
-2. Search for `Yeelight bluetooth`
-3. Install and enjoy automatic updates
+| Lamp | BLE name | Features | Status |
+| --- | --- | --- | --- |
+| Yeelight Bedside | `XMCTD_*` | on/off, brightness, color (HS), color temperature 1700–6500 K | Supported, tested with real hardware by the maintainer |
+| Yeelight Candela | `yeelight_ms*` | on/off, brightness | **Experimental**: the maintainer has no Candela, support is based on community reports. [Tell us how it works for you.](https://github.com/V4n1X/ha_yeelight_bt/issues/new?template=candela_report.yml) |
 
+The Candela behind most proxies does not report its state. Home Assistant then shows an *assumed state* (lightning buttons instead of a toggle) and restores the last known state after a restart.
 
-## 2. Manual Installation
+## Requirements
 
-1. Download the `hass-yeelight_bt.zip` file from the
-   [latest release](https://github.com/hcoohb/hass-yeelightbt/releases/latest).
-2. Unpack the release and copy the `custom_components/yeelight_bt` directory
-   into the `custom_components` directory of your Home Assistant
-   installation.
-3. Ensure bluez is installed and accessible from HA (refer to next section)
-4. Add the `yeelight_bt` lights as described in next section.
+- Home Assistant **2026.10** or newer (tested with 2026.10 and 2026.11)
+- The [Bluetooth integration](https://www.home-assistant.io/integrations/bluetooth/) with a local adapter, or a [Bluetooth proxy](https://esphome.io/components/bluetooth_proxy.html) with active connections (`bluetooth_proxy: active: true`). Every lamp needs a free connection slot.
+- The lamp must **not** be connected to the Yeelight app or any other device.
 
-## Ensure Host bluetooth is accessible from Home-Assistant
+## Installation
 
-Since version 1.0.0, this component uses the [`bleak`](https://github.com/hbldh/bleak) python library to access bluetooth (as bluepy is not supported from HA 2022.07+). In order to scan and interact with bluetooth devices, bluez utility needs to be installed and the correct permissions must be given to HA:
+### Marketplace (Home Assistant 2026.11+)
 
-- for **Home Assistant Operating System**:
-  It should be all setup, at least for HA 2022.7+
+[![Open your Home Assistant instance and open this repository in the Marketplace.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=V4n1X&repository=ha_yeelight_bt&category=integration)
 
-- For **Home Assistant Container** in docker:
+1. Click the button above, or go to **Settings → Marketplace**, search for **Yeelight Bluetooth** (or add `https://github.com/V4n1X/ha_yeelight_bt` as a custom repository of type *Integration*).
+2. Install it. Home Assistant asks for a restart when needed.
 
-  Ensure your host has the `bluetoothctl` binary on the system (coming from `bluez` or `bluez-util` package, depending on the distro).  
-  The docker-compose container (or equivalent docker command) should link _/var/run/dbus_ with host folder through a volume and _NET_ADMIN_ permission is needed. docker compose extract:
+### HACS (Home Assistant 2026.10)
 
-  ```yaml
-  volumes:
-    - /var/run/dbus:/var/run/dbus
-  cap_add:
-    - NET_ADMIN
-    - NET_RAW
-  network_mode: host
-  ```
+The same button opens the repository in HACS. Otherwise add `https://github.com/V4n1X/ha_yeelight_bt` as a custom repository of type *Integration*, install **Yeelight Bluetooth** and restart Home Assistant.
 
-- For **Home Assistant Core** installed in a Virtualenv:
+### Manual
 
-  Ensure your host has the `bluetoothctl` binary on the system (coming from `bluez` or `bluez-util` package, depending on the distro).  
-  Make sure the user running HA belongs to the `bluetooth` group.
+1. Download `yeelight_bt.zip` from the [latest release](https://github.com/V4n1X/ha_yeelight_bt/releases/latest).
+2. Extract it to `<config>/custom_components/yeelight_bt/`.
+3. Restart Home Assistant.
 
-# Homeassistant component configuration
+## Setup
 
-## Adding the device to HA
+[![Open your Home Assistant instance and start setting up Yeelight Bluetooth.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=yeelight_bt)
 
-You must have the `bluetooth` integration enabled and configured (HA 2022.8+) or a connected ESPhome device running the bluetooth proxy (HA 2022.10+). The Lamps should be automatically discovered and you will receive a notification prompting you to add it.
+Lamps in range are **discovered automatically** and show up under **Settings → Devices & services**. You can also add them manually with **Add integration → Yeelight Bluetooth**:
 
-The devices can also be added through the `integration menu` UI:
+- **Select a discovered lamp**: the lamps currently seen by your adapters and proxies.
+- **Enter the MAC address manually**: for lamps that do not advertise their name. Pick the model if it cannot be detected.
 
-- In Configuration/Integrations click on the + button, select `Yeelight bluetooth` and you can either scan for the devices or configure the name and mac address manually on the form.  
-  The light is automatically added and a device is created.
+### Pairing
 
-Please ensure the following steps prior to adding a new light:
+1. If the lamp was paired with another device before, [reset it](https://www.youtube.com/watch?v=PnjcOSgnbAM).
+2. On the first connection the lamp **pulses**. Push the small button on the lamp within 30 seconds. From then on it is paired with Home Assistant.
+3. **Candela**: it usually does not confirm the pairing. If it pulses, push its button and switch it again from Home Assistant. With a local adapter, pairing it once with `bluetoothctl` (`connect <MAC>`, then `pair <MAC>`) is known to help.
 
-- The light must NOT be connected with the official app (or any other device), else HA will not be able to discover it, nor connect to it.
-- Once the light has been paired with this component, you should not try to connect it with the app, or the two will constantly fight for the connection.
-- Some HA integrations still use some bluetooth libraries that take full control of the physical bluetooth adapter, in that case, other ble integration will not have access to it. So to test this component, best to disable all other ble integrations if you are unsure what ble lib they are using.
+Once paired, do not connect the lamp to the Yeelight app anymore, or both will keep fighting for the connection.
 
-## Light pairing
+## How it works
 
-1. If the light has been previously paired with another device, best to reset it following [this youtube video](https://www.youtube.com/watch?v=PnjcOSgnbAM)
-2. The custom component will automatically request a pairing with the lamp if it needs to. When the pairing request is sent, the light will **pulse**. You then need to push the little button at the top of the lamp. Once paired you can control the lamp through HA
+| Topic | Behaviour |
+| --- | --- |
+| State | The Bedside pushes its state. It is additionally polled every 30 s in the background, so changes made on the lamp are seen. |
+| Connection drops | Proxies and adapters regularly drop connections. A failing command is retried once on a new connection. |
+| Availability | A lamp becomes unavailable only when it cannot be reached at all, and is retried every 30 s. |
+| Errors | A command that could not be delivered raises an error, visible in the UI and in automation traces. |
+| Adapters / proxies | The integration always connects through the adapter or proxy that Home Assistant considers best for the lamp. |
 
-# A note on bleak and bluetooth in HA
+## Troubleshooting
 
-Starting with 2022.08, HA is trying to provide a framework centered around the bleak library so that all components can use the same interface and avoid conflicts between the different ble libraries. This is early days and there is still some active work trying to stabilise everything but this integration component has now been converted to be compatible with HA `bluetooth` integration.
+<details>
+<summary><b>The lamp is not discovered</b></summary>
 
-In the process, unfortunately it seems that the candela is not working at the moment.
-I only have one yeelight bedside, so if you have issues with candela or multiple lights, please report an issue (with debugging logs) so we can try to sort it out.
+- Make sure it is not connected to the Yeelight app (close the app, or turn off Bluetooth on the phone).
+- Check that the lamp is in range of an adapter or proxy: **Settings → Devices & services → Bluetooth → Advertisement monitor** should list it.
+- Reset the lamp and try again, or add it with its MAC address.
+</details>
 
-# Debugging
+<details>
+<summary><b>The lamp is unavailable or does not react</b></summary>
 
-Please ensure the following:
+- Proxies need active connections and a free connection slot per lamp.
+- Watch for the pulsing lamp after a reset: it waits for its button to be pushed.
+- Move the proxy closer, Bluetooth range through walls is short.
+</details>
 
-1. The xiaomi yeelight app is not being used and force shut (or even better to turn bt off if unsure).
-2. the Yeelight_bt integration has been removed from HA.
-3. HA has access to the bluetooth adapter (follow the section above in not on HAOS).
-4. No other bluetooth integration are using something else than bleak library for bluetooth. If unsure, disable them.
-5. The logging has been changed in HA to allow debugging of this component and bleak:
-   In order to get more information on what is going on, the debugging flag can be enabled by placing in the `configuration.yaml` of Home assistant:
+<details>
+<summary><b>Home Assistant Container / Core: Bluetooth is not available</b></summary>
 
-   ```yaml
-   logger:
-     default: warning
-     logs:
-       custom_components.yeelight_bt: debug
-       bleak_retry_connector: debug
-       bleak: debug
-       # homeassistant.components.bluetooth: debug  # this can help if needed
-       # homeassistant.components.esphome.bluetooth: debug  # this can help if needed
-   ```
+The host needs BlueZ (`bluetoothctl`). For Docker, share D-Bus and grant the network capabilities:
 
-   NOTE: this will generate A LOT of debugging messages in the logs, so it is not recommended to use for a long time
+```yaml
+volumes:
+  - /var/run/dbus:/var/run/dbus
+cap_add:
+  - NET_ADMIN
+  - NET_RAW
+network_mode: host
+```
 
-6. The light has been fully reset so that it is not paired with any device.
-7. Restart HA
-8. Reinstall the yeelight_bt integration and find the light through a scan.
-9. check the logs and report. Thanks
+For Home Assistant Core, the user running Home Assistant must be in the `bluetooth` group.
+</details>
 
-# Other info
+<details>
+<summary><b>Collect a debug log</b></summary>
 
-Originally based on the work by Teemu Rytilahti [python-yeelightbt](https://github.com/rytilahti/python-yeelightbt), it has been completely re-written to improve stability and only focuses on the integration with HA.
+Go to **Settings → Devices & services → Yeelight Bluetooth → ⋮ → Enable debug logging**, reproduce the problem, then disable debug logging again to download the log. To log from startup, add this to `configuration.yaml`:
+
+```yaml
+logger:
+  logs:
+    custom_components.yeelight_bt: debug
+    bleak_retry_connector: debug
+```
+
+Attach the log to a [bug report](https://github.com/V4n1X/ha_yeelight_bt/issues/new?template=bug_report.yml).
+</details>
+
+## Migrating from hcoohb/hass-yeelightbt
+
+This project continues [hcoohb/hass-yeelightbt](https://github.com/hcoohb/hass-yeelightbt) with the same domain (`yeelight_bt`), so your configured lamps, entities and automations keep working.
+
+1. Remove the old repository in the Marketplace/HACS (**⋮ → Remove**), but keep the integration configured. Two repositories with the same domain cannot be installed at the same time.
+2. Install this repository as described above and restart Home Assistant.
+
+Lamps whose model was never stored are detected again on the first start. The changes are listed in the [changelog](CHANGELOG.md).
+
+## Contributing
+
+Bug reports, Candela test reports and pull requests are welcome.
+
+```shell
+pip install -r requirements-dev.txt
+pytest
+```
+
+The tests need Linux or WSL, like Home Assistant itself. The checklist for testing with real lamps is in [docs/hardware-test.md](docs/hardware-test.md).
+
+## Credits and license
+
+Based on [hcoohb/hass-yeelightbt](https://github.com/hcoohb/hass-yeelightbt) by [@hcoohb](https://github.com/hcoohb), originally inspired by [python-yeelightbt](https://github.com/rytilahti/python-yeelightbt) by Teemu Rytilahti. Version 2 includes community work from [#79](https://github.com/hcoohb/hass-yeelightbt/pull/79), [#80](https://github.com/hcoohb/hass-yeelightbt/pull/80), [#81](https://github.com/hcoohb/hass-yeelightbt/issues/81) and the [mhdsallal fork](https://github.com/mhdsallal/hass-yeelightbt).
+
+Licensed under the [MIT license](LICENSE). This project is not affiliated with Yeelight or Xiaomi.

@@ -1,44 +1,50 @@
 name-template: "v$RESOLVED_VERSION"
 tag-template: "v$RESOLVED_VERSION"
 
-version-template: $COMPLETE
 version-resolver:
   major:
     labels:
       - "major"
+      - "breaking"
   minor:
     labels:
       - "minor"
+      - "enhancement"
   patch:
     labels:
       - "patch"
   default: patch
 
 categories:
-  - title: "🚀 Features"
+  - title: "⚠️ Breaking changes"
+    label: "breaking"
+  - title: "✨ Features"
     labels:
       - "feature"
       - "enhancement"
-  - title: "🐛 Bug Fixes"
+  - title: "🐛 Bug fixes"
     labels:
       - "fix"
       - "bugfix"
       - "bug"
   - title: "🧰 Maintenance"
-    label: "chore"
-  - title: "💥 Breaking Changes"
-    label: "breaking"
-  - title: "🔥 Removals and Deprecations"
+    labels:
+      - "chore"
+      - "github_actions"
+      - "documentation"
+  - title: "🗑️ Removals and deprecations"
     label: "removal"
 exclude-labels:
   - "skip-changelog"
 
 change-template: "- $TITLE @$AUTHOR (#$NUMBER)"
-change-title-escapes: '\<*_&' # You can add # and @ to disable mentions, and add ` to disable code blocks.
+change-title-escapes: '\<*_&'
 
 template: |
-  ## Changes from $PREVIOUS_TAG to v$RESOLVED_VERSION
+  ## Changes
 
   $CHANGES
 
-  **Full Changelog**: https://github.com/$OWNER/$REPOSITORY/compare/$PREVIOUS_TAG...v$RESOLVED_VERSION
+  Remember to bump `version` in `custom_components/yeelight_bt/manifest.json` to v$RESOLVED_VERSION before publishing.
+
+  **Full changelog**: https://github.com/$OWNER/$REPOSITORY/compare/$PREVIOUS_TAG...v$RESOLVED_VERSION

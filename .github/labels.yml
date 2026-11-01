@@ -61,3 +61,9 @@
 - name: draft
   description: Draft PR
   color: EEEEEE
+- name: candela
+  description: Concerns the Yeelight Candela
+  color: F9D0C4
+- name: bedside
+  description: Concerns the Yeelight Bedside lamp
+  color: BFD4F2

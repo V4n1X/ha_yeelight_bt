@@ -1,5 +1,5 @@
 name: Bug report
-description: File a bug/issue
+description: Something does not work as expected
 title: "[Bug] <title>"
 labels: [bug]
 body:
@@ -7,82 +7,72 @@ body:
     attributes:
       value: |
         Thanks for taking the time to fill out this bug report!
+        Please check the [troubleshooting section](https://github.com/V4n1X/ha_yeelight_bt#troubleshooting) first.
   - type: dropdown
     id: light_type
     attributes:
-      label: Light
-      description: "What type of light is this issue about?"
+      label: Lamp
       options:
         - Yeelight Bedside
         - Yeelight Candela
         - Both
-  - type: input
-    id: yeelight_bt_version
-    attributes:
-      label: Yeelight Bt version
-      description: The version of `Yeelight Bt` integration
-      placeholder: ex. v1.0.1 or v1.1.0 ...
     validations:
       required: true
-  - type: dropdown
-    id: ha_type
+  - type: input
+    id: integration_version
     attributes:
-      label: Home-assistant installation type
-      description: What home-assistant type are you running?
-      options:
-        - Home Assistant Operating System (HAOS)
-        - Home Assistant Container (docker)
-        - Home Assistant Core (Virtualenv)
-        - Other (please describe)
+      label: Integration version
+      placeholder: ex. v2.0.0
     validations:
       required: true
   - type: input
     id: ha_version
     attributes:
-      label: Home-assistant version
-      description: The version of Home-assistant
-      placeholder: ex. 2022.6.0 or 2022.7.7, ...
+      label: Home Assistant version
+      placeholder: ex. 2026.11.0
     validations:
       required: true
   - type: dropdown
-    id: bluetooth_integration
+    id: ha_type
     attributes:
-      label: Home-assistant bluetooth integration (2022.8+)
-      description: Have you enabled/configured the HA bluetooth integration?
+      label: Installation type
       options:
-        - "Yes"
-        - No
+        - Home Assistant OS
+        - Home Assistant Container
+        - Home Assistant Core
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: bluetooth_connection
+    attributes:
+      label: Bluetooth connection
+      description: How does Home Assistant reach the lamp?
+      options:
+        - Local bluetooth adapter
+        - ESPHome bluetooth proxy
+        - Shelly bluetooth proxy
+        - Other / several
     validations:
       required: true
   - type: textarea
     id: issue_txt
     attributes:
       label: Describe the issue
-      description: A clear and concise description of what the issue is.
-      placeholder: Describe the issue and what was expected
+      description: What happened, and what did you expect?
     validations:
       required: true
   - type: checkboxes
-    id: debugging_steps
+    id: checks
     attributes:
-      label: "Debugging procedure followed:"
-      description: "Did you followed all steps from the [debugging procedure](https://github.com/hcoohb/hass-yeelightbt#debugging), namely:"
+      label: Checks
       options:
-        - label: 1- Ensure smartphone will not connect with lamp
-        - label: 2- The Yeelight_bt integration has been removed from HA.
-        - label: 3- HA has access to the bluetooth adapter (followed the installation steps if not on HAOS).
-        - label: 4- No other bluetooth integration are using something else than bleak library for bluetooth. If unsure, disable them.
-        - label: 5- The logging has been changed in HA to allow debugging of this component and bleak.
-        - label: 6- The light has been fully reset so that it is not paired with any device.
-        - label: 7- Restart HA
-        - label: 8- Reinstall the yeelight_bt integration and find the light through a scan.
-        - label: 9- Pairing the lamp succeeded
-  - type: textarea
-    id: additional_txt
-    attributes:
-      label: Any additional comments
+        - label: The lamp is not connected to the Yeelight app or another device.
+          required: true
+        - label: I enabled debug logging for the integration and attached the log below.
   - type: textarea
     id: logs
     attributes:
-      label: Logs from the issue
-      description: Paste the log or a pastebin link if too long, thanks
+      label: Debug log
+      description: Settings → Devices & services → Yeelight Bluetooth → ⋮ → Enable debug logging, reproduce the problem, then disable it again to download the log.
+      render: text
