@@ -72,6 +72,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: YeelightBTConfigEntry) -
     ) -> None:
         """Follow the lamp when it is better reachable through another adapter/proxy."""
         lamp.set_ble_device(service_info.device)
+        # The entity is set up for one model: store a model found later and reload
+        if (
+            entry.data.get(CONF_MODEL) not in MODELS
+            and (found := model_from_name(service_info.name)) in MODELS
+        ):
+            hass.config_entries.async_update_entry(
+                entry, data={**entry.data, CONF_MODEL: found}
+            )
+            hass.config_entries.async_schedule_reload(entry.entry_id)
 
     entry.async_on_unload(
         bluetooth.async_register_callback(

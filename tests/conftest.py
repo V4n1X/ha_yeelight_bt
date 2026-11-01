@@ -136,6 +136,8 @@ class FakeLampClient:
     async def write_gatt_char(
         self, uuid: str, data: bytearray, response: bool | None = None
     ) -> None:
+        if not self.is_connected:
+            raise BleakError("Not connected")
         if self.fail_writes:
             self.fail_writes -= 1
             raise BleakError("[Errno 104] Connection reset by peer")

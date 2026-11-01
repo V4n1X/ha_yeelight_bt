@@ -384,16 +384,45 @@ async def test_follows_adapter_and_disconnects_on_stop(
         entry = await _setup(hass, BEDSIDE_ADDRESS, "Bedside")
     lamp = entry.runtime_data
 
-    via_proxy = ble_device(BEDSIDE_ADDRESS, "XMCTD_1")
-    callbacks[0](
-        service_info(BEDSIDE_ADDRESS, "XMCTD_1"), BluetoothChange.ADVERTISEMENT
-    )
-    assert lamp._ble_device is not via_proxy
-    assert lamp._ble_device.address == BEDSIDE_ADDRESS
+    info = service_info(BEDSIDE_ADDRESS, "XMCTD_1")
+    callbacks[0](info, BluetoothChange.ADVERTISEMENT)
+    assert lamp.ble_device is info.device
 
     hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
     await hass.async_block_till_done()
     assert not client.is_connected
+
+
+async def test_model_found_later_is_stored_and_reloaded(
+    hass: HomeAssistant,
+    connector,
+    lamp_visible: None,
+    issue_registry: ir.IssueRegistry,
+) -> None:
+    """An unnamed lamp that later advertises "yeelight_ms" becomes a Candela."""
+    connector(FakeLampClient())
+    callbacks = []
+
+    def _register(hass, callback, matcher, mode):
+        callbacks.append(callback)
+        return lambda: None
+
+    with patch(
+        "homeassistant.components.bluetooth.async_register_callback",
+        side_effect=_register,
+    ):
+        entry = await _setup(hass, CANDELA_ADDRESS, None)
+        assert issue_registry.async_get_issue(DOMAIN, f"unknown_model_{entry.entry_id}")
+
+        callbacks[-1](
+            service_info(CANDELA_ADDRESS, "yeelight_ms"), BluetoothChange.ADVERTISEMENT
+        )
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert entry.data[CONF_MODEL] == "Candela"
+    assert not issue_registry.async_get_issue(DOMAIN, f"unknown_model_{entry.entry_id}")
+    state = hass.states.get("light.lamp")
+    assert state.attributes[ATTR_SUPPORTED_COLOR_MODES] == [ColorMode.BRIGHTNESS]
 
 
 async def test_remove_entry_deletes_repair_issue(

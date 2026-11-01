@@ -61,10 +61,10 @@ def test_model_override_for_unnamed_device() -> None:
     assert lamp.model == MODEL_CANDELA
     lamp = Lamp(ble_device(CANDELA_ADDRESS, None))
     assert lamp.model == MODEL_UNKNOWN
-    assert lamp.has_state_feedback is None
+    # a later advertisement does not switch the model of a running lamp, the
+    # entry is reloaded instead (see test_light)
     lamp.set_ble_device(ble_device(CANDELA_ADDRESS, "yeelight_ms"))
-    assert lamp.model == MODEL_CANDELA
-    assert lamp.has_state_feedback is False
+    assert lamp.model == MODEL_UNKNOWN
 
 
 async def test_bedside_connect_pair_and_state(connector) -> None:
@@ -173,6 +173,28 @@ async def test_works_right_after_system_start(connector) -> None:
         await lamp.turn_on()
     assert lamp.available
     assert lamp.is_on
+
+
+async def test_disconnect_right_after_pairing_is_retried(connector) -> None:
+    """A link dropped during connect/pair goes through the normal retry."""
+    dropped = FakeLampClient()
+    good = FakeLampClient()
+    fake = connector(dropped, good)
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+    original_pair = lamp._pair
+
+    async def pair_then_drop(client):
+        await original_pair(client)
+        if client is dropped:
+            client.is_connected = False
+            client.disconnected_callback(client)
+
+    lamp._pair = pair_then_drop  # type: ignore[method-assign]
+    await lamp.turn_on()
+
+    assert fake.connections == [dropped, good]
+    assert good.commands()[-1] == CMD_POWER
+    assert lamp.available
 
 
 async def test_write_retried_on_new_connection(connector) -> None:

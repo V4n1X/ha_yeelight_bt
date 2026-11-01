@@ -143,7 +143,9 @@ class YeelightBT(LightEntity, RestoreEntity):
     @callback
     def _schedule_update(self, _now: datetime | None = None) -> None:
         """Request the lamp state, unless a request is already running."""
-        self._unsub_reconnect = None
+        if self._unsub_reconnect is not None:
+            self._unsub_reconnect()
+            self._unsub_reconnect = None
         if self._update_task is not None and not self._update_task.done():
             return
         self._update_task = self.hass.async_create_background_task(

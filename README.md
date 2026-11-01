@@ -69,7 +69,7 @@ Afterwards, do not connect the lamp to the Yeelight app anymore. **Reconfigure**
 
 - The **Bedside** pushes its state while connected and is asked for it every 30 s (can be turned off with *Enable polling* in the system options).
 - The **Candela** sends no state. Home Assistant shows the last state it sent and restores it after a restart.
-- A lamp that cannot be reached becomes **unavailable** after about a minute and is retried every 30 s.
+- A lamp that cannot be reached becomes **unavailable** when a command or, for the Bedside, the 30 s update fails (after about a minute) and is retried every 30 s.
 - The device page offers **diagnostics** with the lamp state and the adapter or proxy in use.
 
 **Known limitations**

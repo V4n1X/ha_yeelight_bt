@@ -253,13 +253,6 @@ class Lamp:
     def set_ble_device(self, ble_device: BLEDevice) -> None:
         """Use the BLEDevice that HA currently considers best (adapter/proxy)."""
         self._ble_device = ble_device
-        if self._model == MODEL_UNKNOWN:
-            model = model_from_name(ble_device.name)
-            if model != MODEL_UNKNOWN:
-                _LOGGER.debug("%s: model detected as %s", self._mac, model)
-                self._model = model
-                if model == MODEL_CANDELA:
-                    self._has_state_feedback = False
 
     def _current_ble_device(self) -> BLEDevice:
         """The newest BLEDevice for reconnect attempts of establish_connection."""
@@ -277,13 +270,13 @@ class Lamp:
             self.set_ble_device(ble_device)
 
     # ---- connection / pairing (must be called with the lock held) ----
-    async def _ensure_connected(self) -> None:
+    async def _ensure_connected(self) -> BleakClient:
         if (
             self._client is not None
             and self._client.is_connected
             and self._conn == Conn.PAIRED
         ):
-            return
+            return self._client
         if self._client is not None:
             await self._disconnect_client()
 
@@ -315,7 +308,7 @@ class Lamp:
             # Working implementations (Homey app, candelapy) do neither.
             self._conn = Conn.PAIRED
             self._set_available(True)
-            return
+            return client
 
         await self._start_notify(client)
         await self._pair(client)
@@ -324,6 +317,7 @@ class Lamp:
         if self._notify_active and self.versions is None:
             await self._write(client, struct.pack("BB16x", COMMAND_STX, CMD_GETVER))
             await self._write(client, struct.pack("BB16x", COMMAND_STX, CMD_GETSERIAL))
+        return client
 
     async def _start_notify(self, client: BleakClient) -> None:
         try:
@@ -417,10 +411,9 @@ class Lamp:
             for attempt in (1, 2):
                 try:
                     async with asyncio.timeout(OPERATION_TIMEOUT):
-                        await self._ensure_connected()
-                        assert self._client is not None
+                        client = await self._ensure_connected()
                         if bits is not None:
-                            await self._write(self._client, bits)
+                            await self._write(client, bits)
                 except (YeelightPairingError, YeelightConnectionError) as err:
                     await self._disconnect_client()
                     self._set_available(False, str(err))
