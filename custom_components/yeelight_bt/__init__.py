@@ -117,6 +117,9 @@ def _async_update_model_issue(
 async def async_remove_entry(hass: HomeAssistant, entry: YeelightBTConfigEntry) -> None:
     """Clean up when the lamp is removed."""
     ir.async_delete_issue(hass, DOMAIN, f"unknown_model_{entry.entry_id}")
+    # HA bluetooth reports a device only once per run; let the lamp be
+    # discovered again so it can be re-added without a restart.
+    bluetooth.async_rediscover_address(hass, entry.data[CONF_MAC].upper())
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: YeelightBTConfigEntry) -> bool:

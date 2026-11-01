@@ -23,6 +23,7 @@ The integration follows the Home Assistant integration quality scale up to Plati
 - Schemas use Probatio, Home Assistant's validation engine since 2026.9, instead of voluptuous.
 - Fully typed (`mypy --strict`), test coverage 98 %.
 - Unused protocol helpers removed.
+- A deleted lamp is discovered again right away, without restarting Home Assistant (found in the hardware test).
 
 ### Marketplace
 

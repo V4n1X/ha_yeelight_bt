@@ -85,7 +85,17 @@ After switching to real Kelvin and the quality scale changes (same instance):
 | Repair issues | none (model known) |
 | HA restart | lamp available with the right state |
 
-Not tested yet: in-place entity ID change (needs HA 2026.11), long run over several hours, delete and re-add of the entry (connection test in the config flow), migration from HACS.
+Delete and re-add the entry (after a manual backup):
+
+| Check | Result |
+| --- | --- |
+| Lamp unplugged, discovery dialog submitted | error "Could not connect to or pair with the lamp …", no entry created, dialog stays open |
+| Lamp plugged in again, same dialog submitted | entry created, no pairing needed |
+| Restored settings | entity ID, name, icon, voice assistant exposure, device area and firmware restored (unique ID unchanged) |
+| Discovery after deleting | **missing before the fix** (HA reports a device once per run); with `async_rediscover_address` on removal the lamp is discovered again immediately |
+| Re-add through the flow | 3.4 s incl. the connection test; the first command right after took 16 s once (reconnect through the proxy), then 0.2 s |
+
+Not tested yet: in-place entity ID change (needs HA 2026.11), long run over several hours, migration from HACS.
 
 ## Candela
 

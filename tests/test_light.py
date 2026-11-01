@@ -406,9 +406,14 @@ async def test_remove_entry_deletes_repair_issue(
     entry = await _setup(hass, CANDELA_ADDRESS, None)
     assert issue_registry.async_get_issue(DOMAIN, f"unknown_model_{entry.entry_id}")
 
-    await hass.config_entries.async_remove(entry.entry_id)
-    await hass.async_block_till_done()
+    with patch(
+        "homeassistant.components.bluetooth.async_rediscover_address"
+    ) as rediscover:
+        await hass.config_entries.async_remove(entry.entry_id)
+        await hass.async_block_till_done()
     assert not issue_registry.async_get_issue(DOMAIN, f"unknown_model_{entry.entry_id}")
+    # the lamp shows up as discovered again after deleting it (HA hardware test)
+    rediscover.assert_called_once_with(hass, CANDELA_ADDRESS)
 
 
 async def test_turn_on_edge_cases(
