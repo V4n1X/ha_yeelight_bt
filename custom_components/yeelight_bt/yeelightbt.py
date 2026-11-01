@@ -76,6 +76,12 @@ OPERATION_TIMEOUT = PAIR_BUTTON_TIMEOUT + 60.0
 # The Candela tends to echo an outdated state right after a command.
 STALE_STATE_WINDOW = 3.0
 RETRY_DELAY = 0.5
+# Each attempt may take up to 20 s (bleak-retry-connector), so an unreachable
+# lamp fails within about a minute.
+CONNECT_ATTEMPTS = 3
+# A command waiting for the lock while another one just failed to connect
+# fails right away instead of trying again.
+CONNECT_FAILURE_HOLDOFF = 10.0
 # Some backends (e.g. WinRT) raise a plain OSError when the link drops.
 RETRY_EXCEPTIONS = (*BLEAK_RETRY_EXCEPTIONS, OSError)
 
@@ -93,6 +99,10 @@ class YeelightError(Exception):
 
 class YeelightPairingError(YeelightError):
     """Raised when the lamp refused or did not answer the pairing request."""
+
+
+class YeelightConnectionError(YeelightError):
+    """Raised when no connection could be established (after retries)."""
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -159,6 +169,7 @@ class Lamp:
         self._available = False
         self._contacted = False
         self._last_command = 0.0
+        self._last_connect_failure = 0.0
 
     def __str__(self) -> str:
         """The string representation"""
@@ -256,14 +267,21 @@ class Lamp:
 
         self._refresh_ble_device()
         _LOGGER.debug("%s: connecting through %s", self._mac, self._ble_device)
-        client = await establish_connection(
-            BleakClientWithServiceCache,
-            self._ble_device,
-            self._mac,
-            disconnected_callback=self._disconnected_cb,
-            max_attempts=4,
-            ble_device_callback=self._ble_device_callback,
-        )
+        try:
+            client = await establish_connection(
+                BleakClientWithServiceCache,
+                self._ble_device,
+                self._mac,
+                disconnected_callback=self._disconnected_cb,
+                max_attempts=CONNECT_ATTEMPTS,
+                ble_device_callback=self._ble_device_callback,
+            )
+        except RETRY_EXCEPTIONS as err:
+            # establish_connection already retried, do not start over
+            self._last_connect_failure = time.monotonic()
+            raise YeelightConnectionError(
+                f"Could not connect to {self._mac}: {err!r}"
+            ) from err
         self._client = client
         self._conn = Conn.UNPAIRED
         _LOGGER.debug("%s: connected", self._mac)
@@ -358,16 +376,23 @@ class Lamp:
 
         A failing write is retried once on a fresh connection, as proxies and
         adapters regularly drop connections ("Connection reset by peer",
-        "EOF received", GATT error 133, ...).
+        "EOF received", GATT error 133, ...). A failed connection is not
+        retried again, establish_connection already did.
         """
         async with self._lock:
+            if (
+                not self.is_connected
+                and time.monotonic() - self._last_connect_failure
+                < CONNECT_FAILURE_HOLDOFF
+            ):
+                raise YeelightConnectionError(f"{self._mac} is not reachable")
             for attempt in (1, 2):
                 try:
                     async with asyncio.timeout(OPERATION_TIMEOUT):
                         await self._ensure_connected()
                         assert self._client is not None
                         await self._write(self._client, bits)
-                except YeelightPairingError:
+                except YeelightPairingError, YeelightConnectionError:
                     await self._disconnect_client()
                     self._set_available(False)
                     raise

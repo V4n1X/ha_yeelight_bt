@@ -56,7 +56,26 @@ Bedside (`XMCTD_`, firmware 8705-8753-9016) on Windows/WinRT (Qualcomm FastConne
 | Color/brightness/temperature while off | ignored by the lamp → no longer marked as on |
 | Fast reconnect on WinRT | raised a plain `OSError` → now retried |
 
-Still to do in Home Assistant: discovery and config flow, entity behaviour, HA restart, unplugging the lamp, proxy restart, long run.
+### 2026-11-01, Bedside in Home Assistant
+
+Same lamp, Home Assistant OS 2026.10.4 (the maintainer's production instance, after a manual backup), connected through an ESPHome bluetooth proxy (ESP32, 3 connection slots), 10 Shelly proxies passive only.
+
+| Check | Result |
+| --- | --- |
+| Discovery after installing | OK, "Yeelight Bedside" discovered, German confirmation dialog, no pairing needed |
+| Entity / device | OK; the old entity (`light.nachttischlampe`, name, icon) was restored through the unchanged unique ID; device shows model Bedside and firmware 8705-8753-9016 |
+| White (HA 2740 K) 80 %, warm 2000 K 50 % | OK, neutral white / warm white as seen on the lamp |
+| Turn on with blue from off (upstream #37) | OK, blue directly (2.5 s incl. the power-on wait) |
+| `brightness: 0` | turns the lamp off |
+| Touch control on the lamp | reported to HA immediately (pushed by the lamp) |
+| HA restart | lamp available with the right state right after the start, setup took 0.002 s |
+| Unplug the lamp, send a command | error "Could not send the command …"; **102 s** before the fix below, **57 s** after; entity unavailable |
+| Plug it in again | available again after 20–40 s without restart |
+| Proxy dropped (ESPHome entry reloaded) | lamp stays available, next command reconnects (2.5 s) |
+| Reload of the config entry | OK |
+| Log | no entries of `yeelight_bt` during all tests |
+
+Not tested yet: in-place entity ID change (needs HA 2026.11), long run over several hours, delete and re-add of the entry, migration from HACS.
 
 ## Candela
 

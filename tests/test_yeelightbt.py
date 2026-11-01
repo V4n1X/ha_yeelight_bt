@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import time
+from unittest.mock import AsyncMock, patch
 
+from bleak import BleakError
 import pytest
 
+from custom_components.yeelight_bt import yeelightbt
 from custom_components.yeelight_bt.yeelightbt import (
     CMD_BRIGHTNESS,
     CMD_GETSTATE,
@@ -21,6 +24,7 @@ from custom_components.yeelight_bt.yeelightbt import (
     PAIR_SUCCESS,
     RES_GETSTATE,
     Lamp,
+    YeelightConnectionError,
     YeelightError,
     YeelightPairingError,
     model_from_name,
@@ -198,6 +202,29 @@ async def test_os_error_is_retried(connector) -> None:
     assert fake.connections == [broken, good]
     assert good.commands()[-1] == CMD_POWER
     assert lamp.available
+
+
+async def test_failed_connection_not_retried_again() -> None:
+    """establish_connection already retries, an unreachable lamp fails fast (HA test)."""
+    connect = AsyncMock(side_effect=BleakError("Device not found"))
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+    with patch.object(yeelightbt, "establish_connection", connect):
+        with pytest.raises(YeelightConnectionError):
+            await lamp.turn_on()
+    assert connect.await_count == 1
+    assert not lamp.available
+
+    # a command queued right behind the failed one does not try again
+    with patch.object(yeelightbt, "establish_connection", connect):
+        with pytest.raises(YeelightConnectionError):
+            await lamp.turn_off()
+    assert connect.await_count == 1
+
+    lamp._last_connect_failure -= yeelightbt.CONNECT_FAILURE_HOLDOFF
+    with patch.object(yeelightbt, "establish_connection", connect):
+        with pytest.raises(YeelightConnectionError):
+            await lamp.turn_off()
+    assert connect.await_count == 2
 
 
 async def test_write_failing_twice_raises(connector) -> None:
