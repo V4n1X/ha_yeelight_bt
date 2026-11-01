@@ -11,3 +11,4 @@ __pycache__
 config_entry-*.json
 device-*.json
 home-assistant_*.json
+.openchamber/
