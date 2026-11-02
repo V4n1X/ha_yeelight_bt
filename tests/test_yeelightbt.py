@@ -15,10 +15,13 @@ from custom_components.yeelight_bt.yeelightbt import (
     CMD_GETVER,
     CMD_PAIR,
     CMD_POWER,
+    CMD_RGB,
+    CMD_TEMP,
     COMMAND_STX,
     MODEL_BEDSIDE,
     MODEL_CANDELA,
     MODEL_UNKNOWN,
+    PAIR_ALREADY_PAIRED,
     PAIR_NOT_PAIRED,
     PAIR_REQUESTED,
     PAIR_SUCCESS,
@@ -31,7 +34,10 @@ from custom_components.yeelight_bt.yeelightbt import (
 
 from .conftest import (
     BEDSIDE_ADDRESS,
+    BEDSIDE_VERSION_FRAME,
     CANDELA_ADDRESS,
+    CANDELA_PAIRING_ID,
+    CANDELA_STATE_FRAME,
     FakeLampClient,
     ble_device,
     frame,
@@ -84,7 +90,10 @@ async def test_bedside_connect_pair_and_state(connector) -> None:
     assert lamp.mode == Lamp.MODE_WHITE
     assert lamp.brightness == 80
     assert lamp.temperature == 4080
-    assert lamp.versions == (1, 2, 3, 4, 5)
+    assert lamp.versions == (2231, 2238, 2330)
+    assert lamp.firmware_version == "2231-2238-2330"
+    assert client.writes[0] == bytes.fromhex("436702000000000000000000000000000000")
+    assert client.writes[-1] == bytes.fromhex("434400000000000000000000000000000000")
     assert calls
 
 
@@ -116,19 +125,21 @@ async def test_pairing_failures(connector, responses: tuple[int, ...]) -> None:
 
 
 async def test_candela_is_command_only(connector) -> None:
-    """Like the working Homey app and candelapy: no pairing, no notifications,
-    no state requests, commands right after connecting (upstream #81, #76)."""
-    client = FakeLampClient()
+    """No authorization or queries when the backend cannot receive notifications."""
+    client = FakeLampClient(notify=False, model=MODEL_CANDELA)
     fake = connector(client)
-    lamp = Lamp(ble_device(CANDELA_ADDRESS, "yeelight_ms"))
-    assert lamp.has_state_feedback is False
+    lamp = Lamp(
+        ble_device(CANDELA_ADDRESS, "yeelight_ms"), pairing_id=CANDELA_PAIRING_ID
+    )
+    assert lamp.has_state_feedback is None
 
     # first contact only checks that the lamp can be reached
     await lamp.update()
     assert lamp.available
+    assert lamp.has_state_feedback is False
     assert len(fake.connections) == 1
     assert client.writes == []
-    assert client.notify_calls == 0
+    assert client.notify_calls == 1
 
     # while available nothing is polled
     await lamp.update()
@@ -137,31 +148,195 @@ async def test_candela_is_command_only(connector) -> None:
     await lamp.turn_on()
     await lamp.set_brightness(40)
     assert client.commands() == [CMD_POWER, CMD_BRIGHTNESS]
-    assert client.writes[-1][:3] == bytes((COMMAND_STX, CMD_BRIGHTNESS, 40))
+    assert client.writes[-2] == bytes.fromhex(
+        "43 40 01 01 01 f4 00 00 00 00 00 00 00 00 00 00 00 00"
+    )
+    assert client.writes[-1] == bytes.fromhex(
+        "43 42 28 01 01 f4 00 00 00 00 00 00 00 00 00 00 00 00"
+    )
     assert lamp.is_on
     assert lamp.brightness == 40
 
 
-async def test_candela_never_sends_pairing(connector) -> None:
-    """The pairing request makes a Candela drop the connection, also on reconnects."""
-    client = FakeLampClient()
+async def test_candela_without_notifications_never_pairs(connector) -> None:
+    """An unsupported backend cannot finish authorization, even after reconnects."""
+    client = FakeLampClient(notify=False, model=MODEL_CANDELA)
     connector(client)
-    lamp = Lamp(ble_device(CANDELA_ADDRESS, "yeelight_ms"))
+    lamp = Lamp(
+        ble_device(CANDELA_ADDRESS, "yeelight_ms"), pairing_id=CANDELA_PAIRING_ID
+    )
     await lamp.turn_on()
     client.disconnected_callback(client)
     await lamp.turn_off()
     assert CMD_PAIR not in client.commands()
     assert client.commands() == [CMD_POWER, CMD_POWER]
+    assert client.writes[-1] == bytes.fromhex(
+        "43 40 02 01 01 f4 00 00 00 00 00 00 00 00 00 00 00 00"
+    )
 
 
 async def test_unreachable_candela_is_probed(connector) -> None:
-    client = FakeLampClient()
+    client = FakeLampClient(notify=False, model=MODEL_CANDELA)
     connector(client)
     lamp = Lamp(ble_device(CANDELA_ADDRESS, "yeelight_ms"))
     lamp._set_available(False, "test")
     await lamp.update()
     assert lamp.available
     assert client.writes == []
+
+
+async def test_candela_authorization_state_and_version(connector, caplog) -> None:
+    """Follow APK authorization and its model-specific state/ASCII version format."""
+    client = FakeLampClient(
+        model=MODEL_CANDELA, pair_responses=(PAIR_REQUESTED, PAIR_SUCCESS)
+    )
+    connector(client)
+    pairing_id = bytes.fromhex("0123456789ab")
+    lamp = Lamp(ble_device(CANDELA_ADDRESS, "yeelight_ms"), pairing_id=pairing_id)
+    await lamp.update()
+
+    assert client.writes[0] == bytes.fromhex("43670123456789ab00000000000000000000")
+    assert client.commands() == [CMD_PAIR, CMD_GETVER, CMD_GETSTATE]
+    assert "turn the Candela's cylinder" in caplog.text
+    assert lamp.available
+    assert lamp.has_state_feedback is True
+    assert lamp.is_on
+    assert lamp.brightness == 80
+    assert lamp.mode == Lamp.MODE_WHITE
+    assert lamp.temperature == 1800
+    assert lamp.firmware_version == "2.2.0"
+
+    # A later physical adjustment must replace the locally assumed state.
+    lamp.handle_notification(bytes.fromhex("434500250207080000000000000000000000"))
+    assert not lamp.is_on
+    assert lamp.brightness == 37
+
+    await lamp.disconnect()
+    client.pair_responses = (PAIR_SUCCESS,)
+    await lamp.update()
+    pairs = [packet for packet in client.writes if packet[1] == CMD_PAIR]
+    assert pairs == [pairs[0], pairs[0]]
+
+
+async def test_candela_rejects_bedside_already_paired_code(connector) -> None:
+    client = FakeLampClient(model=MODEL_CANDELA, pair_responses=(PAIR_ALREADY_PAIRED,))
+    connector(client)
+    lamp = Lamp(
+        ble_device(CANDELA_ADDRESS, "yeelight_ms"), pairing_id=CANDELA_PAIRING_ID
+    )
+    with pytest.raises(YeelightPairingError):
+        await lamp.turn_on()
+    assert not lamp.available
+    assert client.commands() == [CMD_PAIR]
+
+
+async def test_subscription_alone_does_not_prove_state_feedback(connector) -> None:
+    client = FakeLampClient(model=MODEL_CANDELA, state=bytearray(b"\x43\x45"))
+    connector(client)
+    lamp = Lamp(
+        ble_device(CANDELA_ADDRESS, "yeelight_ms"), pairing_id=CANDELA_PAIRING_ID
+    )
+    await lamp.update()
+    assert lamp.available
+    assert lamp.firmware_version == "2.2.0"
+    assert lamp.has_state_feedback is None
+    lamp.handle_notification(CANDELA_STATE_FRAME)
+    assert lamp.has_state_feedback is True
+
+
+async def test_backend_change_to_no_notifications(connector) -> None:
+    client = FakeLampClient(model=MODEL_CANDELA)
+    connector(client)
+    lamp = Lamp(
+        ble_device(CANDELA_ADDRESS, "yeelight_ms"), pairing_id=CANDELA_PAIRING_ID
+    )
+    await lamp.update()
+    assert lamp.has_state_feedback is True
+    await lamp.disconnect()
+    client.notify = False
+    client.writes.clear()
+    await lamp.update()
+    assert lamp.has_state_feedback is False
+    assert client.writes == []
+
+    # A later capable backend must resume polling after unsupported notifications.
+    await lamp.disconnect()
+    client.notify = True
+    await lamp.turn_on()
+    assert lamp.has_state_feedback is None
+    await lamp.update()
+    assert lamp.has_state_feedback is True
+
+
+async def test_color_and_temperature_preserve_brightness(connector) -> None:
+    client = FakeLampClient()
+    connector(client)
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+    await lamp.update()
+    await lamp.set_color(255, 0, 0)
+    assert client.writes[-1] == bytes.fromhex("4341ff000000000000000000000000000000")
+    assert lamp.brightness == 80
+    await lamp.set_temperature(4000)
+    assert client.writes[-1] == bytes.fromhex(
+        "43 43 0f a0 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+    )
+    assert lamp.brightness == 80
+    # The real Bedside accepts explicit 5%, even though the app clamps to 10%.
+    await lamp.set_color(255, 0, 0, brightness=5)
+    assert client.writes[-1][:7] == bytes((COMMAND_STX, CMD_RGB, 255, 0, 0, 0, 5))
+    await lamp.set_temperature(4000, brightness=5)
+    assert client.writes[-1][:5] == bytes((COMMAND_STX, CMD_TEMP, 0x0F, 0xA0, 5))
+    assert lamp.brightness == 5
+
+
+def test_bedside_bcd_version_and_invalid_frames() -> None:
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+    lamp.handle_notification(BEDSIDE_VERSION_FRAME)
+    assert lamp.versions == (2231, 2238, 2330)
+    assert lamp.firmware_version == "2231-2238-2330"
+    for packet in (
+        b"\x43\x5d",
+        BEDSIDE_VERSION_FRAME[:10],
+        b"\x99" + BEDSIDE_VERSION_FRAME[1:],
+        bytes.fromhex("435d022001ab3122382330"),
+    ):
+        lamp.handle_notification(packet)
+        assert lamp.firmware_version == "2231-2238-2330"
+    lamp.handle_notification(bytes.fromhex("435d022001ffff22382330"))
+    assert lamp.firmware_version == "0-2238-2330"
+
+
+def test_candela_payload_offsets_and_truncated_notifications() -> None:
+    lamp = Lamp(ble_device(CANDELA_ADDRESS, "yeelight_ms"))
+    lamp.handle_notification(CANDELA_STATE_FRAME)
+    assert lamp.brightness == 80
+    assert lamp.temperature == 1800
+    for packet in (
+        b"\x43\x45",
+        CANDELA_STATE_FRAME[:6],
+        b"\x43\x45\x01\x50\x03\x00\x00\x00",
+    ):
+        lamp.handle_notification(packet)
+        assert lamp.brightness == 80
+        assert lamp.mode == Lamp.MODE_WHITE
+    lamp.handle_notification(bytes.fromhex("4345010a0300000025"))
+    assert lamp.mode == Lamp.MODE_FLOW
+    assert lamp.brightness == 37
+    lamp.handle_notification(b"\x43\x5d2.2.0\x00")
+    for packet in (b"\x43\x5d", b"\x43\x5d\xff\x00", b"\x43\x5d\x01\x00"):
+        lamp.handle_notification(packet)
+        assert lamp.firmware_version == "2.2.0"
+
+
+def test_candela_unknown_mode_keeps_power_and_brightness() -> None:
+    """The APK still consumes power/brightness when the mode is unrecognized."""
+    lamp = Lamp(ble_device(CANDELA_ADDRESS, "yeelight_ms"))
+    lamp.handle_notification(CANDELA_STATE_FRAME)
+    lamp.handle_notification(bytes.fromhex("434502250007080000000000000000000000"))
+    assert not lamp.is_on
+    assert lamp.brightness == 37
+    assert lamp.mode == Lamp.MODE_WHITE
+    assert lamp.temperature == 1800
 
 
 async def test_works_right_after_system_start(connector) -> None:

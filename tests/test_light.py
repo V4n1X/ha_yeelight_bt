@@ -40,22 +40,26 @@ from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 import pytest
 
-from custom_components.yeelight_bt.const import CONF_MODEL, DOMAIN
+from custom_components.yeelight_bt.const import CONF_MODEL, CONF_PAIRING_ID, DOMAIN
 from custom_components.yeelight_bt.diagnostics import (
     async_get_config_entry_diagnostics,
 )
 from custom_components.yeelight_bt.yeelightbt import (
     CMD_BRIGHTNESS,
     CMD_GETSTATE,
+    CMD_PAIR,
     CMD_POWER,
     CMD_RGB,
     CMD_TEMP,
     COMMAND_STX,
+    MODEL_CANDELA,
+    PAIR_REQUESTED,
 )
 
 from .conftest import (
     BEDSIDE_ADDRESS,
     CANDELA_ADDRESS,
+    CANDELA_PAIRING_ID,
     FakeLampClient,
     MockConfigEntry,
     async_fire_time_changed,
@@ -92,11 +96,17 @@ def lamp_visible() -> Generator[None]:
 
 
 async def _setup(
-    hass: HomeAssistant, address: str, model: str | None, **entry_kwargs: Any
+    hass: HomeAssistant,
+    address: str,
+    model: str | None,
+    pairing_id: str | None = None,
+    **entry_kwargs: Any,
 ) -> MockConfigEntry:
     data = {CONF_NAME: "Lamp", CONF_MAC: address}
     if model:
         data[CONF_MODEL] = model
+    if pairing_id is not None:
+        data[CONF_PAIRING_ID] = pairing_id
     entry = MockConfigEntry(
         domain=DOMAIN,
         unique_id=address.lower(),
@@ -146,7 +156,7 @@ async def test_bedside(
         (DOMAIN, BEDSIDE_ADDRESS), entry.entry_id
     )
     assert device.model == "Bedside"
-    assert device.sw_version == "2-3-4"
+    assert device.sw_version == "2231-2238-2330"
 
     await hass.services.async_call(
         LIGHT_DOMAIN,
@@ -154,7 +164,7 @@ async def test_bedside(
         {ATTR_ENTITY_ID: entity_id, ATTR_HS_COLOR: (0, 100), ATTR_BRIGHTNESS: 255},
         blocking=True,
     )
-    assert client.writes[-1][:7] == bytes((COMMAND_STX, CMD_RGB, 255, 0, 0, 1, 100))
+    assert client.writes[-1][:7] == bytes((COMMAND_STX, CMD_RGB, 255, 0, 0, 0, 100))
     state = hass.states.get(entity_id)
     assert state.attributes[ATTR_COLOR_MODE] == ColorMode.HS
     assert state.attributes[ATTR_HS_COLOR] == (0.0, 100.0)
@@ -166,7 +176,8 @@ async def test_bedside(
         blocking=True,
     )
     # true Kelvin: 2740 K = 0x0AB4 is sent unchanged
-    assert client.writes[-1][:5] == bytes((COMMAND_STX, CMD_TEMP, 0x0A, 0xB4, 100))
+    assert client.writes[-1][:5] == bytes((COMMAND_STX, CMD_TEMP, 0x0A, 0xB4, 0))
+    assert hass.states.get(entity_id).attributes[ATTR_BRIGHTNESS] == 255
     state = hass.states.get(entity_id)
     assert state.attributes[ATTR_COLOR_MODE] == ColorMode.COLOR_TEMP
     assert state.attributes[ATTR_COLOR_TEMP_KELVIN] == 2740
@@ -198,7 +209,7 @@ async def test_candela_proxy(
     mock_restore_cache(hass, [State("light.lamp", STATE_ON, {ATTR_BRIGHTNESS: 128})])
     client = FakeLampClient(notify=False)
     connector(client)
-    await _setup(hass, CANDELA_ADDRESS, "Candela")
+    await _setup(hass, CANDELA_ADDRESS, "Candela", pairing_id=CANDELA_PAIRING_ID.hex())
 
     state = hass.states.get("light.lamp")
     assert state.state == STATE_ON
@@ -232,6 +243,84 @@ async def test_candela_proxy(
         hass.states.get("light.lamp").attributes[ATTR_COLOR_MODE]
         == ColorMode.BRIGHTNESS
     )
+
+
+async def test_candela_feedback_and_stable_pairing(
+    hass: HomeAssistant,
+    connector,
+    lamp_visible: None,
+    device_registry: dr.DeviceRegistry,
+) -> None:
+    client = FakeLampClient(model=MODEL_CANDELA)
+    connector(client)
+    entry = await _setup(
+        hass, CANDELA_ADDRESS, MODEL_CANDELA, pairing_id=CANDELA_PAIRING_ID.hex()
+    )
+    state = hass.states.get("light.lamp")
+    assert state.state == STATE_ON
+    assert state.attributes[ATTR_BRIGHTNESS] == 204
+    assert ATTR_ASSUMED_STATE not in state.attributes
+    device = device_registry.async_get_device_by_identifier(
+        (DOMAIN, CANDELA_ADDRESS), entry.entry_id
+    )
+    assert device.sw_version == "2.2.0"
+    assert client.writes[0][2:8] == CANDELA_PAIRING_ID
+
+    entry.runtime_data.handle_notification(
+        bytes.fromhex("434500250207080000000000000000000000")
+    )
+    assert hass.states.get("light.lamp").state == STATE_OFF
+
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    pairs = [packet for packet in client.writes if packet[1] == CMD_PAIR]
+    assert len(pairs) == 2
+    assert pairs[0] == pairs[1]
+
+
+@pytest.mark.parametrize("responses", [(PAIR_REQUESTED,), ()])
+async def test_existing_candela_does_not_request_authorization(
+    hass: HomeAssistant, connector, lamp_visible: None, responses: tuple[int, ...]
+) -> None:
+    """An existing entry must remain usable without someone confirming pairing."""
+    client = FakeLampClient(model=MODEL_CANDELA, pair_responses=responses)
+    connector(client)
+    entry = await _setup(hass, CANDELA_ADDRESS, MODEL_CANDELA)
+    assert entry.runtime_data.available
+    for _ in range(2):
+        await hass.services.async_call(
+            LIGHT_DOMAIN,
+            SERVICE_TURN_ON,
+            {ATTR_ENTITY_ID: "light.lamp", ATTR_BRIGHTNESS: 128},
+            blocking=True,
+        )
+        assert hass.states.get("light.lamp").state == STATE_ON
+        client.disconnected_callback(client)
+    assert client.commands() == [CMD_POWER, CMD_BRIGHTNESS] * 2
+    assert client.notify_calls == 0
+
+
+async def test_bedside_reconnect_keeps_confirmed_feedback(
+    hass: HomeAssistant, connector, lamp_visible: None
+) -> None:
+    client = FakeLampClient()
+    connector(client)
+    entry = await _setup(hass, BEDSIDE_ADDRESS, "Bedside")
+    lamp = entry.runtime_data
+    feedback = []
+    lamp.add_callback_on_state_changed(lambda: feedback.append(lamp.has_state_feedback))
+    client.writes.clear()
+    client.disconnected_callback(client)
+    for brightness in (128, 64):
+        await hass.services.async_call(
+            LIGHT_DOMAIN,
+            SERVICE_TURN_ON,
+            {ATTR_ENTITY_ID: "light.lamp", ATTR_BRIGHTNESS: brightness},
+            blocking=True,
+        )
+        assert ATTR_ASSUMED_STATE not in hass.states.get("light.lamp").attributes
+    assert feedback and all(value is True for value in feedback)
+    assert client.commands() == [CMD_PAIR, CMD_BRIGHTNESS, CMD_BRIGHTNESS]
 
 
 async def test_unreachable_at_startup(
@@ -295,7 +384,8 @@ async def test_diagnostics(hass: HomeAssistant, connector, lamp_visible: None) -
     assert diag["lamp"]["model"] == "Bedside"
     assert diag["lamp"]["available"] is True
     assert diag["lamp"]["state_feedback"] is True
-    assert diag["lamp"]["versions"] == (1, 2, 3, 4, 5)
+    assert diag["lamp"]["versions"] == (2231, 2238, 2330)
+    assert diag["lamp"]["firmware_version"] == "2231-2238-2330"
     assert diag["lamp"]["temperature"] == 4080
     assert set(diag["connection_via"]) == {"source", "name"}
 

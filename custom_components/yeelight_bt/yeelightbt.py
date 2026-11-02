@@ -31,7 +31,8 @@ CONTROL_UUID = "aa7d3f34-2d4f-41e0-807f-52fbf8cf7443"
 
 COMMAND_STX = 0x43
 CMD_PAIR = 0x67
-CMD_PAIR_ON = 0x02
+# Android's unavailable adapter address, used by the Bedside app as its ID.
+BEDSIDE_PAIRING_ID = bytes.fromhex("020000000000")
 RES_PAIR = 0x63
 CMD_POWER = 0x40
 CMD_POWER_ON = 0x01
@@ -41,7 +42,7 @@ CMD_BRIGHTNESS = 0x42
 CMD_TEMP = 0x43
 CMD_RGB = 0x41
 CMD_GETSTATE = 0x44
-CMD_GETSTATE_SEC = 0x02
+CMD_GETSTATE_SEC = 0x00
 RES_GETSTATE = 0x45
 CMD_GETNAME = 0x52
 RES_GETNAME = 0x53
@@ -67,10 +68,9 @@ TEMP_MAX = 6500
 
 # Time to wait for the pairing answer of a lamp that sends notifications.
 PAIR_RESPONSE_TIMEOUT = 5.0
-# Time given to the user to push the lamp button when it asks for pairing.
+# Time given to confirm pairing on the lamp (button or Candela cylinder).
 PAIR_BUTTON_TIMEOUT = 30.0
-# Without notifications (Candela, some proxies) there is no pairing answer,
-# so the lamp only gets a short grace period before we assume it is paired.
+# A Bedside without notifications gets a short grace period after pairing.
 PAIR_GRACE_PERIOD = 1.0
 # Upper bound for one connect + pair + write cycle, so that a stuck backend
 # can never hold the lock (and make the lamp unavailable) forever.
@@ -101,6 +101,10 @@ class YeelightError(Exception):
 
 class YeelightPairingError(YeelightError):
     """Raised when the lamp refused or did not answer the pairing request."""
+
+
+class YeelightPairingTimeoutError(YeelightPairingError):
+    """Raised when pairing gets no answer or no confirmation before its deadline."""
 
 
 class YeelightConnectionError(YeelightError):
@@ -137,12 +141,18 @@ class Lamp:
         ble_device: BLEDevice,
         model: str | None = None,
         ble_device_callback: Callable[[], BLEDevice | None] | None = None,
+        pairing_id: bytes | None = None,
     ) -> None:
         self._client: BleakClient | None = None
         self._ble_device = ble_device
         self._ble_device_callback = ble_device_callback
         self._mac = ble_device.address
         self._model = model if model in MODELS else model_from_name(ble_device.name)
+        self._pairing_id = pairing_id
+        if self._pairing_id is None and self._model != MODEL_CANDELA:
+            self._pairing_id = BEDSIDE_PAIRING_ID
+        if self._pairing_id is not None and len(self._pairing_id) != 6:
+            raise ValueError("The pairing identifier must contain six bytes")
         _LOGGER.debug(
             "Initializing Yeelight Lamp %s (%s), model %s",
             ble_device.name,
@@ -157,6 +167,7 @@ class Lamp:
             self.MODE_WHITE if self._model == MODEL_CANDELA else None
         )
         self.versions: tuple[int, ...] | None = None
+        self.firmware_version: str | None = None
         self.serial: int | None = None
 
         # store func to call on state received:
@@ -166,10 +177,9 @@ class Lamp:
         self._pair_resp_event = asyncio.Event()
         self._pair_result: int | None = None
         self._notify_active = False
-        # None until the first connection told us whether notifications work,
-        # the Candela never reports a usable state
+        # None until a valid state arrives; False for command-only operation.
         self._has_state_feedback: bool | None = (
-            False if self._model == MODEL_CANDELA else None
+            False if self._model == MODEL_CANDELA and self._pairing_id is None else None
         )
         self._available = False
         self._contacted = False
@@ -301,25 +311,35 @@ class Lamp:
         self._conn = Conn.UNPAIRED
         _LOGGER.debug("%s: connected", self._mac)
 
-        if self._model == MODEL_CANDELA:
-            # The Candela takes commands right away. It has no reliable state
-            # notifications, and the pairing request puts it back into pairing
-            # mode and makes it drop the connection after a few seconds (#81).
-            # Working implementations (Homey app, candelapy) do neither.
+        if self._model == MODEL_CANDELA and self._pairing_id is None:
+            # Existing entries were command-only. New authorization requires
+            # someone to turn the cylinder, so only the config flow initiates it.
             self._conn = Conn.PAIRED
             self._set_available(True)
             return client
 
         await self._start_notify(client)
+        if self._model == MODEL_CANDELA and not self._notify_active:
+            # Android can receive Gingko notifications without writing a CCCD.
+            # Backends that require that missing descriptor need command-only
+            # operation; requesting authorization here cannot be completed.
+            self._conn = Conn.PAIRED
+            self._set_available(True)
+            return client
+
         await self._pair(client)
         self._set_available(True)
 
-        if self._notify_active and self.versions is None:
+        if self._notify_active and self.firmware_version is None:
             await self._write(client, struct.pack("BB16x", COMMAND_STX, CMD_GETVER))
-            await self._write(client, struct.pack("BB16x", COMMAND_STX, CMD_GETSERIAL))
+            if self._model != MODEL_CANDELA:
+                await self._write(
+                    client, struct.pack("BB16x", COMMAND_STX, CMD_GETSERIAL)
+                )
         return client
 
     async def _start_notify(self, client: BleakClient) -> None:
+        previous_feedback = self._has_state_feedback
         try:
             await client.start_notify(NOTIFY_UUID, self._notification_handler)
         except (BleakError, ValueError) as err:
@@ -327,10 +347,12 @@ class Lamp:
             # CCCD descriptor. Commands still work, we just get no feedback.
             _LOGGER.debug("%s: notifications not available: %s", self._mac, err)
             self._notify_active = False
+            self._has_state_feedback = False
         else:
             self._notify_active = True
-        if self._has_state_feedback != self._notify_active:
-            self._has_state_feedback = self._notify_active
+            if self._has_state_feedback is False:
+                self._has_state_feedback = None
+        if self._has_state_feedback != previous_feedback:
             self.run_state_changed_cb()
 
     async def _pair(self, client: BleakClient) -> None:
@@ -338,8 +360,9 @@ class Lamp:
         self._pair_resp_event.clear()
         self._pair_result = None
         _LOGGER.debug("%s: request pairing", self._mac)
+        assert self._pairing_id is not None
         await self._write(
-            client, struct.pack("BBB15x", COMMAND_STX, CMD_PAIR, CMD_PAIR_ON)
+            client, struct.pack("BB6s10x", COMMAND_STX, CMD_PAIR, self._pairing_id)
         )
 
         if not self._notify_active:
@@ -353,24 +376,23 @@ class Lamp:
                 async with asyncio.timeout(timeout):
                     await self._pair_resp_event.wait()
             except TimeoutError:
-                raise YeelightPairingError(
+                raise YeelightPairingTimeoutError(
                     "The lamp did not answer the pairing request"
                     if self._pair_answer() is None
-                    else "The pairing button of the lamp was not pushed"
+                    else "The pairing request was not confirmed on the lamp"
                 ) from None
             self._pair_resp_event.clear()
             if (answer := self._pair_answer()) != PAIR_REQUESTED:
                 break
             timeout = PAIR_BUTTON_TIMEOUT
 
-        if answer in (PAIR_SUCCESS, PAIR_ALREADY_PAIRED):
+        if answer == PAIR_SUCCESS or (
+            answer == PAIR_ALREADY_PAIRED and self._model != MODEL_CANDELA
+        ):
             return
         if answer == PAIR_NOT_PAIRED:
             raise YeelightPairingError("The lamp refused the pairing request")
-        raise YeelightPairingError(
-            "The pairing request returned unexpected results, reset the lamp"
-            " (https://www.youtube.com/watch?v=PnjcOSgnbAM)"
-        )
+        raise YeelightPairingError(f"The lamp rejected pairing (response {answer!r})")
 
     async def _disconnect_client(self) -> None:
         client = self._client
@@ -470,6 +492,11 @@ class Lamp:
         return self._has_state_feedback
 
     @property
+    def confirmed_pairing_id(self) -> bytes | None:
+        """Return the identifier explicitly accepted during this connection test."""
+        return self._pairing_id if self._pair_result == PAIR_SUCCESS else None
+
+    @property
     def model(self) -> str:
         return self._model
 
@@ -500,15 +527,24 @@ class Lamp:
             self._brightness = min(100, max(0, brightness))
 
     # ---- commands ----
+    def _power_brightness_command(self, command: int, value: int) -> bytes:
+        payload = bytes((COMMAND_STX, command, value))
+        if self._model == MODEL_CANDELA:
+            # Gingko builders d4.c.x/v append this transition block.
+            payload += b"\x01\x01\xf4"
+        return payload.ljust(18, b"\x00")
+
     async def update(self) -> None:
         """Request the state of the lamp (sent back through a notification).
 
-        Lamps without state feedback (Candela) are only contacted when they
+        Lamps without state feedback are only contacted when they
         are unavailable, to find out if they can be reached again.
         """
+        if self._has_state_feedback is False and self._available:
+            return
+        # Connect first: a new backend may not support Candela notifications.
+        await self.send_cmd(None)
         if self._has_state_feedback is False:
-            if not self._available:
-                await self.send_cmd(None)
             return
         bits = struct.pack("BBB15x", COMMAND_STX, CMD_GETSTATE, CMD_GETSTATE_SEC)
         _LOGGER.debug("Send Cmd: Get_state")
@@ -516,7 +552,7 @@ class Lamp:
 
     async def turn_on(self) -> None:
         """Turn the lamp on. (send back state through notif)"""
-        bits = struct.pack("BBB15x", COMMAND_STX, CMD_POWER, CMD_POWER_ON)
+        bits = self._power_brightness_command(CMD_POWER, CMD_POWER_ON)
         _LOGGER.debug("Send Cmd: Turn On")
         await self.send_cmd(bits)
         self._is_on = True
@@ -525,7 +561,7 @@ class Lamp:
 
     async def turn_off(self) -> None:
         """Turn the lamp off. (send back state through notif)"""
-        bits = struct.pack("BBB15x", COMMAND_STX, CMD_POWER, CMD_POWER_OFF)
+        bits = self._power_brightness_command(CMD_POWER, CMD_POWER_OFF)
         _LOGGER.debug("Send Cmd: Turn Off")
         await self.send_cmd(bits)
         self._is_on = False
@@ -539,38 +575,39 @@ class Lamp:
         """Set the brightness [1-100] (no notif)"""
         brightness = min(100, max(1, int(brightness)))
         _LOGGER.debug("Send Cmd: Brightness %s", brightness)
-        bits = struct.pack("BBB15x", COMMAND_STX, CMD_BRIGHTNESS, brightness)
+        bits = self._power_brightness_command(CMD_BRIGHTNESS, brightness)
         await self.send_cmd(bits)
         self._brightness = brightness
 
     async def set_temperature(self, kelvin: int, brightness: int | None = None) -> None:
         """Set the temperature (White mode) [1700 - 6500 K] (no notif)"""
-        if brightness is None:
-            brightness = self._brightness
-        brightness = min(100, max(1, int(brightness)))
+        if brightness is not None:
+            brightness = min(100, max(1, int(brightness)))
         kelvin = min(TEMP_MAX, max(TEMP_MIN, int(kelvin)))
         _LOGGER.debug("Send Cmd: Temperature %s, %s", kelvin, brightness)
-        bits = struct.pack(">BBhB13x", COMMAND_STX, CMD_TEMP, kelvin, brightness)
+        # Zero preserves brightness, as in the app's colour/CT-only calls.
+        bits = struct.pack(">BBHB13x", COMMAND_STX, CMD_TEMP, kelvin, brightness or 0)
         await self.send_cmd(bits)
         self._temperature = kelvin
-        self._brightness = brightness
+        if brightness is not None:
+            self._brightness = brightness
         self._mode = self.MODE_WHITE
 
     async def set_color(
         self, red: int, green: int, blue: int, brightness: int | None = None
     ) -> None:
         """Set the color of the lamp [0-255] (no notif)"""
-        if brightness is None:
-            brightness = self._brightness
-        brightness = min(100, max(1, int(brightness)))
+        if brightness is not None:
+            brightness = min(100, max(1, int(brightness)))
         red, green, blue = (min(255, max(0, int(c))) for c in (red, green, blue))
         _LOGGER.debug("Send Cmd: Color %s, %s", (red, green, blue), brightness)
         bits = struct.pack(
-            "BBBBBBB11x", COMMAND_STX, CMD_RGB, red, green, blue, 0x01, brightness
+            "BBBBBBB11x", COMMAND_STX, CMD_RGB, red, green, blue, 0x00, brightness or 0
         )
         await self.send_cmd(bits)
         self._rgb = (red, green, blue)
-        self._brightness = brightness
+        if brightness is not None:
+            self._brightness = brightness
         self._mode = self.MODE_COLOR
 
     # ---- notifications ----
@@ -580,34 +617,65 @@ class Lamp:
         self.handle_notification(bytes(data))
 
     def handle_notification(self, data: bytes) -> None:
-        """Process one 18 byte notification frame."""
-        if len(data) < 18:
-            _LOGGER.debug("%s: ignoring short notification 0x%s", self._mac, data.hex())
+        """Process a Legacy notification, validating the fields it contains."""
+        if len(data) < 2 or data[0] != COMMAND_STX:
+            _LOGGER.debug(
+                "%s: ignoring invalid notification 0x%s", self._mac, data.hex()
+            )
             return
-        data = data[:18]
         res_type = data[1]
 
         if res_type == RES_GETSTATE:
-            state = struct.unpack(">xxBBBBBBBhx6x", data)
-            self._is_on = state[0] == CMD_POWER_ON
-            self._mode = state[1]
-            self._rgb = (state[2], state[3], state[4])
-            self._brightness = state[6]
-            self._temperature = state[7]
+            if self._model == MODEL_CANDELA:
+                if len(data) < 7:
+                    return
+                mode = data[4]
+                if mode == self.MODE_FLOW:
+                    if len(data) < 9:
+                        return
+                    brightness = data[8]
+                    temperature = 0
+                elif mode == self.MODE_WHITE:
+                    brightness = data[3]
+                    temperature = int.from_bytes(data[5:7], "big")
+                else:
+                    # Gingko still reports power/brightness for unknown modes.
+                    brightness = data[3]
+                    temperature = self._temperature
+                if mode in (self.MODE_WHITE, self.MODE_FLOW):
+                    self._mode = mode
+                self._brightness = brightness
+                self._temperature = temperature
+            else:
+                if len(data) < 11:
+                    return
+                self._mode = data[3]
+                self._rgb = (data[4], data[5], data[6])
+                self._brightness = data[8]
+                self._temperature = int.from_bytes(data[9:11], "big")
+            self._is_on = data[2] == CMD_POWER_ON
+            self._has_state_feedback = True
             _LOGGER.debug("%s", self)
             self.run_state_changed_cb()
 
         elif res_type == RES_PAIR:
+            if len(data) < 3:
+                return
             pair_mode = data[2]
             self._pair_result = pair_mode
             if pair_mode == PAIR_REQUESTED:
                 _LOGGER.warning(
-                    "Yeelight %s pairing request: push the little button of the lamp"
-                    " now! (All commands are ignored until the lamp is paired)",
+                    "Yeelight %s pairing request: %s"
+                    " (All commands are ignored until the lamp is paired)",
                     self._mac,
+                    "turn the Candela's cylinder now"
+                    if self._model == MODEL_CANDELA
+                    else "push the little button of the lamp now",
                 )
                 self._conn = Conn.PAIRING
-            elif pair_mode in (PAIR_SUCCESS, PAIR_ALREADY_PAIRED):
+            elif pair_mode == PAIR_SUCCESS or (
+                pair_mode == PAIR_ALREADY_PAIRED and self._model != MODEL_CANDELA
+            ):
                 _LOGGER.debug("%s: paired (0x%02x)", self._mac, pair_mode)
                 self._conn = Conn.PAIRED
             elif pair_mode == PAIR_NOT_PAIRED:
@@ -620,8 +688,7 @@ class Lamp:
             else:
                 # 0x06 / 0x07: lamp disconnect imminent
                 _LOGGER.error(
-                    "The pairing request of %s returned unexpected results (0x%02x)."
-                    " Please reset the lamp (https://www.youtube.com/watch?v=PnjcOSgnbAM)",
+                    "The pairing request of %s was rejected (0x%02x)",
                     self._mac,
                     pair_mode,
                 )
@@ -629,10 +696,33 @@ class Lamp:
             self._pair_resp_event.set()
 
         elif res_type == RES_GETVER:
-            self.versions = struct.unpack("<xxBxHHHH6x", data)
-            _LOGGER.debug("%s: versions %s", self._mac, self.versions)
+            try:
+                if self._model == MODEL_CANDELA:
+                    version = data[2:].split(b"\x00", 1)[0].decode("ascii")
+                    if not version or not version.isprintable():
+                        return
+                else:
+                    if len(data) < 11:
+                        return
+                    # App utils.a.l: BCD MCU A/B and BLE versions. The first
+                    # two slots use ffff for an absent MCU image.
+                    versions = tuple(
+                        0 if raw == b"\xff\xff" and index < 2 else int(raw.hex())
+                        for index, raw in enumerate((data[5:7], data[7:9], data[9:11]))
+                    )
+                    version = "-".join(map(str, versions))
+                    self.versions = versions
+            except ValueError:
+                _LOGGER.debug(
+                    "%s: invalid firmware response 0x%s", self._mac, data.hex()
+                )
+                return
+            self.firmware_version = version
+            _LOGGER.debug("%s: firmware %s", self._mac, version)
             self.run_state_changed_cb()
 
         elif res_type == RES_GETSERIAL:
+            if len(data) < 3:
+                return
             self.serial = data[2]
             _LOGGER.debug("%s: serial %s", self._mac, self.serial)

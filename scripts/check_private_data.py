@@ -33,6 +33,7 @@ ALLOWED_MACS = {
     "F8:24:41:E6:3E:39",  # upstream example lamp
     "F8:24:41:C0:0E:D2",  # from a public upstream issue log
     "AA:BB:CC:DD:EE:FF",
+    "02:00:00:00:00:00",  # Android's public unavailable-adapter placeholder
     "00:00:00:00:00:01",  # adapter of the HA test fixtures
 }
 SKIP_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".ico", ".zip")

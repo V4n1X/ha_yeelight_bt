@@ -183,9 +183,9 @@ class YeelightBT(LightEntity, RestoreEntity):
 
     @callback
     def _update_sw_version(self) -> None:
-        if not self._dev.versions:
+        if not self._dev.firmware_version:
             return
-        sw_version = "-".join(map(str, self._dev.versions[1:4]))
+        sw_version = self._dev.firmware_version
         if sw_version == self._sw_version:
             return
         self._sw_version = sw_version
@@ -205,8 +205,8 @@ class YeelightBT(LightEntity, RestoreEntity):
 
     @property
     def assumed_state(self) -> bool:
-        """The state is assumed when the lamp sends no notifications."""
-        return self._dev.has_state_feedback is False
+        """State is assumed until a valid state notification has been received."""
+        return self._dev.has_state_feedback is not True
 
     @property
     def is_on(self) -> bool:
@@ -267,7 +267,7 @@ class YeelightBT(LightEntity, RestoreEntity):
         if ATTR_BRIGHTNESS in kwargs:
             brightness: int | None = self._to_lamp_brightness(kwargs[ATTR_BRIGHTNESS])
         else:
-            brightness = self._dev.brightness or None
+            brightness = None
 
         try:
             await self._async_turn_on(kwargs, brightness)
@@ -295,10 +295,10 @@ class YeelightBT(LightEntity, RestoreEntity):
         modes = self._attr_supported_color_modes or set()
         if ATTR_HS_COLOR in kwargs and ColorMode.HS in modes:
             red, green, blue = color_hs_to_RGB(*kwargs[ATTR_HS_COLOR])
-            await self._dev.set_color(red, green, blue, brightness=brightness or 100)
+            await self._dev.set_color(red, green, blue, brightness=brightness)
         elif ATTR_COLOR_TEMP_KELVIN in kwargs and ColorMode.COLOR_TEMP in modes:
             await self._dev.set_temperature(
-                kwargs[ATTR_COLOR_TEMP_KELVIN], brightness=brightness or 100
+                kwargs[ATTR_COLOR_TEMP_KELVIN], brightness=brightness
             )
         elif ATTR_BRIGHTNESS in kwargs and brightness is not None:
             await self._dev.set_brightness(brightness)

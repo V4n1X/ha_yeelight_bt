@@ -11,8 +11,8 @@ from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import issue_registry as ir
 
-from .const import CONF_MODEL, DOMAIN
-from .yeelightbt import MODEL_UNKNOWN, MODELS, Lamp, model_from_name
+from .const import CONF_MODEL, CONF_PAIRING_ID, DOMAIN
+from .yeelightbt import MODEL_CANDELA, MODEL_UNKNOWN, MODELS, Lamp, model_from_name
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -57,11 +57,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: YeelightBTConfigEntry) -
             )
     _async_update_model_issue(hass, entry, model)
 
+    pairing_id = entry.data.get(CONF_PAIRING_ID)
     lamp = Lamp(
         ble_device,
         model=model,
         ble_device_callback=lambda: bluetooth.async_ble_device_from_address(
             hass, address, connectable=True
+        ),
+        pairing_id=(
+            bytes.fromhex(pairing_id) if model == MODEL_CANDELA and pairing_id else None
         ),
     )
 

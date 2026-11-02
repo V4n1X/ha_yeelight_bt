@@ -33,6 +33,7 @@ async def async_get_config_entry_diagnostics(
             "connected": lamp.is_connected,
             "state_feedback": lamp.has_state_feedback,
             "versions": lamp.versions,
+            "firmware_version": lamp.firmware_version,
             "serial": lamp.serial,
             "is_on": lamp.is_on,
             "mode": lamp.mode,

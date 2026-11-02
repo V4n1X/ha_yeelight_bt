@@ -97,6 +97,115 @@ Delete and re-add the entry (after a manual backup):
 
 Not tested yet: in-place entity ID change (needs HA 2026.11), long run over several hours, migration from HACS.
 
+### 2026-11-02, Legacy protocol comparison with Yeelight APK 3.5.4
+
+One Bedside (`XMCTD_`), connected locally on Windows/WinRT with bleak 3.0.2.
+The HA connection was temporarily disabled by the user. Results below are
+actual BLE notification readbacks, not simulated responses or optical measurements.
+
+The version response was:
+
+```text
+43 5d 02 20 01 22 31 22 38 23 30 04 03 04 04 04 03 00
+```
+
+The APK's BCD decoder reads MCU A/B/BLE from frame bytes 5–6 / 7–8 / 9–10:
+**2231-2238-2330**. The previous decoder instead displayed **8705-8753-9016**
+by reading little-endian integers across field boundaries. The version labels
+in the November 1 test runs above are historical output of that old decoder.
+
+Before changing the integration, an independent raw-GATT probe passed **11/11**
+checks:
+
+| Check | Readback |
+| --- | --- |
+| State queries `43 44 00` and `43 44 02` | Same state |
+| 4000 K with brightness 30 | White mode, 4000 K, 30% |
+| RGB with the APK's `00` extra byte | Requested red, 30% |
+| RGB with the old integration's `01` extra byte | Requested green, 30% |
+| RGB with brightness sentinel `00` | Requested blue, brightness stays 30% |
+| CT with brightness sentinel `00` | 3000 K, brightness stays 30% |
+| Brightness 1 | On, 1% |
+| CT with explicit brightness 5 | 4000 K, 5% |
+| RGB with explicit brightness 5 | Requested red, 5% |
+| Power off | Off |
+| Power on | On |
+
+Authorization with the existing Android-placeholder identifier returned `04`
+(already paired). First-time authorization after a factory reset was not tested.
+The original power, mode, colour and brightness were restored and verified.
+
+The updated `yeelightbt.Lamp` was then exercised on the same lamp, using an
+isolated Windows Python 3.14.7 environment with bleak 3.0.2 and
+bleak-retry-connector 4.7.1. **7/7 checks passed**: correct version, RGB at 5%,
+CT preserving 5%, RGB preserving 5%, brightness 1%, power off, and reconnect.
+Every state check required a fresh notification, so optimistic local state
+could not make it pass. The original state was restored and the PC disconnected.
+These runs used the actual updated protocol class; HA entity/config-flow
+behaviour was checked separately in the mocked HA test suites.
+
+Initial regression validation: **62 tests passed** on HA 2026.10.4 and **62 passed**
+on HA 2026.11.0b1 (Python 3.14.4). Ruff lint/format checks and the repository's
+private-data checks passed. The beta environment emitted five deprecation
+warnings from HA/backoff dependencies. No updated package was deployed to the
+production HA instance during these runs.
+
+Decisions from this run:
+
+- Use the APK's `43 44 00` query and RGB `00` byte; their exact optional-field
+  semantics beyond the tested operations remain unknown.
+- Use the keep-brightness sentinel for colour/CT-only changes.
+- Retain explicit 1–100% brightness support: the app's combined-command
+  minimum of 10% is not a limit of this tested firmware.
+- Correct BCD version decoding and use the captured version frame in tests.
+
+Local captures are kept outside Git as
+`yeelight-bedside-probe-20261102-172215.json` and
+`yeelight-updated-driver-20261102-174233.json`. No Bluetooth addresses or
+Home Assistant credentials from these runs were added to this report.
+
 ## Candela
 
 The maintainer has no Candela. Candela results come from users through the [Candela test report](https://github.com/V4n1X/ha_yeelight_bt/issues/new?template=candela_report.yml) issue template.
+
+The current legacy Gingko implementation follows APK 3.5.4 for power/brightness
+payloads, six-byte authorization identifiers, status offsets and ASCII firmware
+versions. Tests use explicitly labelled APK-derived examples, not hardware captures.
+New-device setup derives the identifier from the persistent HA instance UUID and
+stores it only after successful authorization. Runtime uses that stored value;
+existing entries without one stay command-only after upgrades. If the backend cannot subscribe to
+notifications, command-only operation remains available without an authorization
+request that could not be answered. The APK's Android-only notification setup
+without a CCCD write does not establish support in every HA Bluetooth backend.
+Until a valid state notification arrives, the HA entity continues to report an
+assumed state even when subscription and authorization have succeeded.
+Successful reconnects preserve already-confirmed feedback. An unknown Candela
+mode does not discard the independent power and brightness fields.
+
+### Review regression checks
+
+Four new cases reproduced failures before the compatibility fixes: an existing
+Candela entry with only `PAIR_REQUESTED`, one with no pairing response, a Bedside
+reconnect initiated by brightness commands, and a Candela off notification with
+an unknown mode. The fixes keep existing entries command-only, persist only
+confirmed setup identifiers, retain confirmed feedback after successful
+reconnects, and consume Candela power/brightness independently of its mode.
+
+After the fixes, **68/68 tests passed** on both HA 2026.10.4 and HA 2026.11.0b1.
+Tests also cover failed setup authorization followed by an unsupported backend:
+an unconfirmed identifier is not saved. Backend recovery from unsupported to
+supported notifications resumes polling. This follow-up used simulated BLE
+responses and did not repeat the physical hardware runs above.
+
+### New-device setup fallback checks
+
+The next review exposed the same authorization compatibility issue during fresh
+Candela setup. Five cases failed before the fix: no response or only
+`PAIR_REQUESTED` through discovery and manual auto-detection, plus a disconnect
+before confirmation. Setup now closes the attempted connection and retries once
+without a pairing identifier. A successful retry saves the Candela model but no
+`pairing_id`; a failed retry does not create an entry. Explicit authorization
+refusals and Bedside timeouts remain errors.
+
+The resulting suite passed **74/74 tests** on HA 2026.10.4 and HA 2026.11.0b1.
+These tests use simulated BLE responses; no additional hardware run was performed.

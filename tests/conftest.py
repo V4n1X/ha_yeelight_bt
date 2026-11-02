@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Generator
-import struct
 import time
 from typing import Any
 from unittest.mock import patch
@@ -35,15 +34,23 @@ from custom_components.yeelight_bt.yeelightbt import (
     CMD_GETVER,
     CMD_PAIR,
     COMMAND_STX,
+    MODEL_BEDSIDE,
+    MODEL_CANDELA,
     PAIR_SUCCESS,
     RES_GETSERIAL,
     RES_GETSTATE,
-    RES_GETVER,
     RES_PAIR,
 )
 
 BEDSIDE_ADDRESS = "F8:24:41:E6:3E:39"
 CANDELA_ADDRESS = "F8:24:41:C0:0E:D2"
+CANDELA_PAIRING_ID = bytes.fromhex("0123456789ab")
+
+# Literal Bedside notification captured on 2026-11-02, not packed by our decoder.
+BEDSIDE_VERSION_FRAME = bytes.fromhex("435d02200122312238233004030404040300")
+# Gingko examples follow the APK's r3.f0.G1 layout; no Candela capture is available.
+CANDELA_STATE_FRAME = bytes.fromhex("434501500207080000000000000000000000")
+CANDELA_VERSION_FRAME = b"\x43\x5d2.2.0\x00".ljust(18, b"\x00")
 
 __all__ = ["MockConfigEntry", "async_fire_time_changed", "mock_restore_cache"]
 
@@ -110,11 +117,19 @@ class FakeLampClient:
         pair_responses: tuple[int, ...] = (PAIR_SUCCESS,),
         state: bytearray | None = None,
         fail_writes: int = 0,
+        model: str = MODEL_BEDSIDE,
     ) -> None:
         self.notify = notify
         self.pair_responses = pair_responses
-        self.state = state or frame(
-            COMMAND_STX, RES_GETSTATE, 0x01, 0x02, 0, 0, 0, 0, 80, 0x0F, 0xF0
+        self.state = state or (
+            bytearray(CANDELA_STATE_FRAME)
+            if model == MODEL_CANDELA
+            else frame(
+                COMMAND_STX, RES_GETSTATE, 0x01, 0x02, 0, 0, 0, 0, 80, 0x0F, 0xF0
+            )
+        )
+        self.version_frame = (
+            CANDELA_VERSION_FRAME if model == MODEL_CANDELA else BEDSIDE_VERSION_FRAME
         )
         self.fail_writes = fail_writes
         self.writes: list[bytes] = []
@@ -161,9 +176,7 @@ class FakeLampClient:
             loop.call_soon(
                 self._handler,
                 None,
-                bytearray(
-                    struct.pack("<BBBxHHHH6x", COMMAND_STX, RES_GETVER, 1, 2, 3, 4, 5)
-                ),
+                bytearray(self.version_frame),
             )
 
     async def disconnect(self) -> None:

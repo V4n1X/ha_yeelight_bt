@@ -14,7 +14,7 @@ from homeassistant.components.bluetooth import (
 )
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_MAC, CONF_NAME
-from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import device_registry as dr, instance_id
 from homeassistant.helpers.selector import (
     SelectSelector,
     SelectSelectorConfig,
@@ -22,14 +22,16 @@ from homeassistant.helpers.selector import (
 )
 import probatio
 
-from .const import CONF_MODEL, DOMAIN, MODEL_AUTO
+from .const import CONF_MODEL, CONF_PAIRING_ID, DOMAIN, MODEL_AUTO
 from .yeelightbt import (
     MODEL_BEDSIDE,
     MODEL_CANDELA,
     MODEL_UNKNOWN,
+    MODELS,
     PAIR_BUTTON_TIMEOUT,
     Lamp,
     YeelightError,
+    YeelightPairingTimeoutError,
     model_from_name,
 )
 
@@ -59,26 +61,52 @@ class Yeelight_btConfigFlow(ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         self._discovery_info: BluetoothServiceInfoBleak | None = None
         self._discovered: dict[str, str] = {}
+        self._candela_data: dict[str, str] = {}
 
     async def _async_test_connection(
         self, address: str, model: str | None
     ) -> str | None:
-        """Connect and pair once, return an error key or None."""
+        """Test pairing, retry an unconfirmed Candela once in command-only mode."""
+        self._candela_data = {}
         ble_device = async_ble_device_from_address(
             self.hass, address.upper(), connectable=True
         )
         if ble_device is None:
             return "not_found"
-        lamp = Lamp(ble_device, model=model)
-        try:
-            async with asyncio.timeout(CONNECTION_TEST_TIMEOUT):
-                await lamp.update()
-        except (YeelightError, TimeoutError) as err:
-            _LOGGER.debug("Connection test with %s failed: %s", address, err)
-            return "cannot_connect"
-        finally:
-            await lamp.disconnect()
-        return None
+        if model not in MODELS:
+            model = model_from_name(ble_device.name)
+        pairing_ids = (
+            (
+                bytes.fromhex(
+                    (await instance_id.async_get(self.hass)).replace("-", "")[:12]
+                ),
+                None,
+            )
+            if model == MODEL_CANDELA
+            else (None,)
+        )
+        for pairing_id in pairing_ids:
+            lamp = Lamp(ble_device, model=model, pairing_id=pairing_id)
+            try:
+                async with asyncio.timeout(CONNECTION_TEST_TIMEOUT):
+                    await lamp.update()
+            except YeelightPairingTimeoutError as err:
+                _LOGGER.debug("Pairing with %s was not confirmed: %s", address, err)
+            except (YeelightError, TimeoutError) as err:
+                _LOGGER.debug("Connection test with %s failed: %s", address, err)
+                return "cannot_connect"
+            else:
+                if model == MODEL_CANDELA:
+                    self._candela_data[CONF_MODEL] = MODEL_CANDELA
+                    if lamp.confirmed_pairing_id is not None:
+                        self._candela_data[CONF_PAIRING_ID] = (
+                            lamp.confirmed_pairing_id.hex()
+                        )
+                return None
+            finally:
+                # Release the attempted authorization connection before retrying.
+                await lamp.disconnect()
+        return "cannot_connect"
 
     async def async_step_bluetooth(
         self, discovery_info: BluetoothServiceInfoBleak
@@ -242,4 +270,5 @@ class Yeelight_btConfigFlow(ConfigFlow, domain=DOMAIN):
         data = {CONF_NAME: name, CONF_MAC: address.upper()}
         if model and model != MODEL_UNKNOWN:
             data[CONF_MODEL] = model
+        data.update(self._candela_data)
         return self.async_create_entry(title=name, data=data)

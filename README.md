@@ -35,10 +35,18 @@ Control the Yeelight **Bedside lamp** and the **Candela** from Home Assistant: l
 | Bluetooth name | `XMCTD_*` | `yeelight_ms*` |
 | On / off, brightness 1–100 % | ✓ | ✓ |
 | Color, color temperature 1700–6500 K | ✓ | – |
-| Changes made on the lamp | shown immediately | not reported, the last state sent is shown |
+| Changes made on the lamp | shown immediately | shown after confirmed setup authorization with a notification-capable backend; otherwise the last state sent is shown |
 | Status | **supported**, tested with real hardware | **experimental** |
 
-**Candela:** the maintainer has no Candela. Its support follows two independent implementations that work with real lamps ([Homey Candela app](https://github.com/KevinvOosterhout/com.kevinvanoosterhout.yeelightcandela), [candelapy](https://github.com/praschak/candelapy)). Only the original Bluetooth Candela is supported, with the **switch underneath it in the Bluetooth position**. [Tell us how it works for you.](https://github.com/V4n1X/ha_yeelight_bt/issues/new?template=candela_report.yml)
+**Candela:** the maintainer has no Candela. Its command formats, authorization and state decoding follow the legacy Gingko path in the [Yeelight 3.5.4 APK analysis](docs/app-ble-protocol.md). This path is not hardware-verified here. Backends unable to enable notifications retain command-only operation, as in [Homey Candela](https://github.com/KevinvOosterhout/com.kevinvanoosterhout.yeelightcandela) and [candelapy](https://github.com/praschak/candelapy). Only the original Bluetooth Candela is supported, with the **switch underneath it in the Bluetooth position**. [Tell us how it works for you.](https://github.com/V4n1X/ha_yeelight_bt/issues/new?template=candela_report.yml)
+
+**Existing Candela entries keep command-only operation after upgrading.** They
+continue to work without a new authorization request during startup or polling.
+Authorization is tested during new-device setup, when you can turn the cylinder;
+only a successfully confirmed identifier is stored for subsequent connections.
+If the lamp gives no answer or confirmation times out, setup closes that connection
+and tests a fresh command-only connection. On success the entry is created without
+a pairing identifier, including when the adapter supports notifications.
 
 ## Requirements
 
@@ -61,15 +69,15 @@ Manual: extract `yeelight_bt.zip` from the [latest release](https://github.com/V
 Lamps in range show up as discovered under **Settings → Devices & services**; lamps without a name can be added with their MAC address. Home Assistant connects to the lamp before the setup finishes.
 
 - **Bedside**: if it was used with another device, [reset it](https://www.youtube.com/watch?v=PnjcOSgnbAM) first. When it **pulses** during the setup, push its small button within 30 seconds.
-- **Candela**: no pairing needed. Charge it and put the switch underneath it in the Bluetooth position.
+- **Candela**: charge it and put the switch underneath it in the Bluetooth position. If it requests authorization, turn its cylinder within 30 seconds. Without an answer or confirmation, setup retries a connection for basic control. Backends without notification support use command-only operation directly.
 
 Afterwards, do not connect the lamp to the Yeelight app anymore. **Reconfigure** in the ⋮ menu of the lamp changes the model if it was detected wrongly.
 
 ## How it works
 
 - The **Bedside** pushes its state while connected and is asked for it every 30 s (can be turned off with *Enable polling* in the system options).
-- The **Candela** sends no state. Home Assistant shows the last state it sent and restores it after a restart.
-- A lamp that cannot be reached becomes **unavailable** when a command or, for the Bedside, the 30 s update fails (after about a minute) and is retried every 30 s.
+- The **Candela** is also polled every 30 s for entries authorized during setup when notifications are available. Older entries and backends without notification support show the last state Home Assistant sent and restore it after a restart.
+- A lamp that cannot be reached becomes **unavailable** when a command or a supported 30 s update fails (after about a minute) and is retried every 30 s.
 - The device page offers **diagnostics** with the lamp state and the adapter or proxy in use.
 
 **Known limitations**

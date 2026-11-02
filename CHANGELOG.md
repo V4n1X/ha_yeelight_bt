@@ -1,5 +1,30 @@
 # Changelog
 
+## v2.1.0
+
+Requires Home Assistant 2026.10 or newer, tested with 2026.10 and 2026.11.
+
+### Bedside
+
+- The state query and the color command now use the same bytes as the Yeelight app 3.5.4 (tested on a real lamp).
+- Changing the color or color temperature without a brightness keeps the lamp's current brightness.
+- The firmware version is now shown correctly (e.g. `2231-2238-2330` instead of `8705-8753-9016`).
+- The lamp state stays confirmed after a reconnect: no short "assumed state" in the UI and no extra power-on command.
+
+### Candela (experimental)
+
+- Power and brightness commands use the format of the Yeelight app 3.5.4.
+- **New: state feedback.** When a Candela is added through a Bluetooth backend that supports notifications, Home Assistant asks you to turn the cylinder to authorize it. After that, changes made on the lamp and its firmware version are shown.
+- If the authorization is not confirmed or not answered, the Candela is still added, in command-only mode as before.
+- **Existing Candela entries are unchanged:** they stay command-only and get no pairing request. To get state feedback, remove the lamp and add it again.
+- An "off" message from the lamp is no longer dropped when it reports an unknown mode.
+- The maintainer has no Candela: these changes follow the app and are not tested with real hardware yet. Please use the [Candela test report](https://github.com/V4n1X/ha_yeelight_bt/issues/new?template=candela_report.yml).
+
+### Development
+
+- Protocol reference from the Yeelight app 3.5.4: [docs/app-ble-protocol.md](docs/app-ble-protocol.md).
+- Tests with a real Bedside version answer and with Candela frames taken from the app; hardware test report updated.
+
 ## v2.0.0
 
 First release of [V4n1X/ha_yeelight_bt](https://github.com/V4n1X/ha_yeelight_bt), the continuation of [hcoohb/hass-yeelightbt](https://github.com/hcoohb/hass-yeelightbt). The domain stays `yeelight_bt`, existing lamps keep working (see the migration notes in the README).

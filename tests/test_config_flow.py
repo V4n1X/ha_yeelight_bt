@@ -2,22 +2,32 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Generator
 from unittest.mock import AsyncMock, patch
 
+from bleak import BleakError
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_MAC, CONF_NAME
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers import instance_id
 import pytest
 
-from custom_components.yeelight_bt.const import CONF_MODEL, DOMAIN
-from custom_components.yeelight_bt.yeelightbt import CMD_PAIR
+from custom_components.yeelight_bt import yeelightbt
+from custom_components.yeelight_bt.const import CONF_MODEL, CONF_PAIRING_ID, DOMAIN
+from custom_components.yeelight_bt.yeelightbt import (
+    CMD_PAIR,
+    PAIR_NOT_PAIRED,
+    PAIR_REQUESTED,
+)
 
 from .conftest import (
     BEDSIDE_ADDRESS,
     CANDELA_ADDRESS,
+    CANDELA_STATE_FRAME,
+    CANDELA_VERSION_FRAME,
     FakeLampClient,
     MockConfigEntry,
     ble_device,
@@ -85,21 +95,187 @@ async def test_pick_discovered_device(
     options = result["data_schema"].schema[CONF_MAC].container
     assert set(options) == {BEDSIDE_ADDRESS, CANDELA_ADDRESS}
 
+    lamp.state = bytearray(CANDELA_STATE_FRAME)
+    lamp.version_frame = CANDELA_VERSION_FRAME
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {CONF_MAC: CANDELA_ADDRESS, CONF_NAME: "Candela"}
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY, result.get("errors")
     assert result["title"] == "Candela"
+    identifier = bytes.fromhex((await instance_id.async_get(hass))[:12])
     assert result["data"] == {
         CONF_NAME: "Candela",
         CONF_MAC: CANDELA_ADDRESS,
         CONF_MODEL: "Candela",
+        CONF_PAIRING_ID: identifier.hex(),
     }
     assert result["result"].unique_id == CANDELA_ADDRESS.lower()
-    # the connection was tested before the entry was created; a Candela only
-    # gets connected, it is never sent the pairing request
-    assert lamp.writes == []
+    # Authorization uses a stable app identifier, as in the APK.
+    assert lamp.writes[0][1] == CMD_PAIR
+    assert lamp.writes[0][2:8] == identifier
     assert not lamp.is_connected
+
+
+async def test_manual_candela_auto_uses_instance_identifier(
+    hass: HomeAssistant, lamp: FakeLampClient
+) -> None:
+    """Auto detection must select the same identifier as the eventual setup."""
+    lamp.state = bytearray(CANDELA_STATE_FRAME)
+    lamp.version_frame = CANDELA_VERSION_FRAME
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "manual"}
+    )
+    with patch(
+        "homeassistant.helpers.instance_id.async_get",
+        return_value="00112233-4455-6677-8899-aabbccddeeff",
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {CONF_NAME: "Candela", CONF_MAC: CANDELA_ADDRESS, CONF_MODEL: "auto"},
+        )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert lamp.writes[0][1:8] == bytes.fromhex("67001122334455")
+    assert result["data"][CONF_PAIRING_ID] == "001122334455"
+    assert result["data"][CONF_MODEL] == "Candela"
+
+
+@pytest.mark.parametrize("responses", [(PAIR_REQUESTED,), ()])
+@pytest.mark.parametrize("manual", [False, True])
+async def test_candela_config_flow_falls_back_without_confirmation(
+    hass: HomeAssistant,
+    lamp: FakeLampClient,
+    responses: tuple[int, ...],
+    manual: bool,
+) -> None:
+    lamp.pair_responses = responses
+    if manual:
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "manual"}
+        )
+        user_input = {
+            CONF_NAME: "Candela",
+            CONF_MAC: CANDELA_ADDRESS,
+            CONF_MODEL: "auto",
+        }
+    else:
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": config_entries.SOURCE_BLUETOOTH},
+            data=service_info(CANDELA_ADDRESS, "yeelight_ms"),
+        )
+        user_input = {CONF_NAME: "Candela"}
+
+    original_connect = yeelightbt.establish_connection
+    connect = AsyncMock(side_effect=original_connect.__call__)
+    with patch.object(yeelightbt, "establish_connection", connect):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input
+        )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_MODEL] == "Candela"
+    assert CONF_PAIRING_ID not in result["data"]
+    assert connect.await_count == 2
+    assert lamp.notify_calls == 1
+    assert lamp.commands() == [CMD_PAIR]
+    assert not lamp.is_connected
+
+
+async def test_candela_fallback_reconnects_after_pairing_disconnect(
+    hass: HomeAssistant, lamp: FakeLampClient
+) -> None:
+    lamp.pair_responses = (PAIR_REQUESTED,)
+    original_write = lamp.write_gatt_char
+    dropped = False
+
+    def disconnect() -> None:
+        nonlocal dropped
+        dropped = True
+        lamp.is_connected = False
+        lamp.disconnected_callback(lamp)
+
+    async def write_then_disconnect(uuid, data, response=None):
+        await original_write(uuid, data, response)
+        if data[1] == CMD_PAIR:
+            asyncio.get_running_loop().call_later(0.03, disconnect)
+
+    lamp.write_gatt_char = write_then_disconnect
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_BLUETOOTH},
+        data=service_info(CANDELA_ADDRESS, "yeelight_ms"),
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_NAME: "Candela"}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert CONF_PAIRING_ID not in result["data"]
+    assert dropped
+    assert lamp.commands() == [CMD_PAIR]
+    assert not lamp.is_connected
+
+
+async def test_failed_candela_fallback_does_not_create_entry(
+    hass: HomeAssistant, lamp: FakeLampClient
+) -> None:
+    lamp.pair_responses = ()
+    original_connect = yeelightbt.establish_connection
+    attempts = 0
+
+    async def connect(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            raise BleakError("Device no longer reachable")
+        return await original_connect(*args, **kwargs)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_BLUETOOTH},
+        data=service_info(CANDELA_ADDRESS, "yeelight_ms"),
+    )
+    with patch.object(yeelightbt, "establish_connection", connect):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_NAME: "Candela"}
+        )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "cannot_connect"}
+    assert not hass.config_entries.async_entries(DOMAIN)
+    assert attempts == 2
+
+
+@pytest.mark.parametrize(
+    ("address", "name", "responses"),
+    [
+        (BEDSIDE_ADDRESS, "XMCTD_1", ()),
+        (CANDELA_ADDRESS, "yeelight_ms", (PAIR_NOT_PAIRED,)),
+    ],
+)
+async def test_pairing_errors_without_fallback(
+    hass: HomeAssistant,
+    lamp: FakeLampClient,
+    address: str,
+    name: str,
+    responses: tuple[int, ...],
+) -> None:
+    lamp.pair_responses = responses
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_BLUETOOTH},
+        data=service_info(address, name),
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_NAME: "Lamp"}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "cannot_connect"}
+    assert not hass.config_entries.async_entries(DOMAIN)
+    assert lamp.commands() == [CMD_PAIR]
 
 
 async def test_pick_device_cannot_connect(
