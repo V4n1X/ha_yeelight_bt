@@ -1,22 +1,22 @@
 <div align="center">
 
-<img src="custom_components/yeelight_bt/brand/icon.png" alt="Yeelight Bluetooth logo" width="120">
+<img src="https://raw.githubusercontent.com/V4n1X/ha_yeelight_bt/main/custom_components/yeelight_bt/brand/icon.png" alt="Yeelight Bluetooth logo" width="120">
 
 # Yeelight Bluetooth for Home Assistant
 
 Control the Yeelight **Bedside lamp** and the **Candela** from Home Assistant: locally over Bluetooth, through a Bluetooth adapter or proxy.
 
-[![Version](https://img.shields.io/github/manifest-json/v/V4n1X/ha_yeelight_bt?filename=custom_components%2Fyeelight_bt%2Fmanifest.json&label=version)](CHANGELOG.md)
+[![Version](https://img.shields.io/github/manifest-json/v/V4n1X/ha_yeelight_bt?filename=custom_components%2Fyeelight_bt%2Fmanifest.json&label=version)](https://github.com/V4n1X/ha_yeelight_bt/blob/main/CHANGELOG.md)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.10%2B-41BDF5?logo=homeassistant&logoColor=white)](https://www.home-assistant.io/)
 [![Marketplace](https://img.shields.io/badge/Marketplace%20%2F%20HACS-custom-41BDF5)](#installation)
 [![Validate](https://github.com/V4n1X/ha_yeelight_bt/actions/workflows/validate.yml/badge.svg)](https://github.com/V4n1X/ha_yeelight_bt/actions/workflows/validate.yml)
 [![Tests](https://github.com/V4n1X/ha_yeelight_bt/actions/workflows/tests.yml/badge.svg)](https://github.com/V4n1X/ha_yeelight_bt/actions/workflows/tests.yml)
-[![License](https://img.shields.io/github/license/V4n1X/ha_yeelight_bt)](LICENSE)
+[![License](https://img.shields.io/github/license/V4n1X/ha_yeelight_bt)](https://github.com/V4n1X/ha_yeelight_bt/blob/main/LICENSE)
 
 <table>
   <tr>
-    <td align="center"><img src="docs/images/bedside.webp" alt="Yeelight Bedside lamp" width="200"><br><b>Bedside</b><br>color · white · brightness</td>
-    <td align="center"><img src="docs/images/candela.webp" alt="Yeelight Candela" width="200"><br><b>Candela</b><br>brightness · experimental</td>
+    <td align="center"><img src="https://raw.githubusercontent.com/V4n1X/ha_yeelight_bt/main/docs/images/bedside.webp" alt="Yeelight Bedside lamp" width="200"><br><b>Bedside</b><br>color · white · brightness</td>
+    <td align="center"><img src="https://raw.githubusercontent.com/V4n1X/ha_yeelight_bt/main/docs/images/candela.webp" alt="Yeelight Candela" width="200"><br><b>Candela</b><br>brightness · experimental</td>
   </tr>
 </table>
 
@@ -38,7 +38,7 @@ Control the Yeelight **Bedside lamp** and the **Candela** from Home Assistant: l
 | Changes made on the lamp | shown immediately | shown after confirmed setup authorization with a notification-capable backend; otherwise the last state sent is shown |
 | Status | **supported**, tested with real hardware | **experimental** |
 
-**Candela:** the maintainer has no Candela. Its command formats, authorization and state decoding follow the legacy Gingko path in the [Yeelight 3.5.4 APK analysis](docs/app-ble-protocol.md). This path is not hardware-verified here. Backends unable to enable notifications retain command-only operation, as in [Homey Candela](https://github.com/KevinvOosterhout/com.kevinvanoosterhout.yeelightcandela) and [candelapy](https://github.com/praschak/candelapy). Only the original Bluetooth Candela is supported, with the **switch underneath it in the Bluetooth position**. [Tell us how it works for you.](https://github.com/V4n1X/ha_yeelight_bt/issues/new?template=candela_report.yml)
+**Candela:** the maintainer has no Candela. Its command formats, authorization and state decoding follow the legacy Gingko path in the [Yeelight 3.5.4 APK analysis](https://github.com/V4n1X/ha_yeelight_bt/blob/main/docs/app-ble-protocol.md). This path is not hardware-verified here. Backends unable to enable notifications retain command-only operation, as in [Homey Candela](https://github.com/KevinvOosterhout/com.kevinvanoosterhout.yeelightcandela) and [candelapy](https://github.com/praschak/candelapy). Only the original Bluetooth Candela is supported, with the **switch underneath it in the Bluetooth position**. [Tell us how it works for you.](https://github.com/V4n1X/ha_yeelight_bt/issues/new?template=candela_report.yml)
 
 **Existing Candela entries keep command-only operation after upgrading.** They
 continue to work without a new authorization request during startup or polling.
@@ -150,7 +150,7 @@ actions:
 
 ## Migrating from hcoohb/hass-yeelightbt
 
-This project continues [hcoohb/hass-yeelightbt](https://github.com/hcoohb/hass-yeelightbt) with the same domain, so your lamps, entities and automations keep working. Remove the old repository in the Marketplace/HACS (keep the integration configured), install this one and restart Home Assistant. See the [changelog](CHANGELOG.md) for all changes.
+This project continues [hcoohb/hass-yeelightbt](https://github.com/hcoohb/hass-yeelightbt) with the same domain, so your lamps, entities and automations keep working. Remove the old repository in the Marketplace/HACS (keep the integration configured), install this one and restart Home Assistant. See the [changelog](https://github.com/V4n1X/ha_yeelight_bt/blob/main/CHANGELOG.md) for all changes.
 
 > [!IMPORTANT]
 > **Color temperature is real Kelvin now.** Version 1.x shifted the values: 2740 K in Home Assistant became about 4080 K on the lamp. Automations and scenes with a color temperature look different after the update; use about 4000 K for neutral white.
@@ -161,7 +161,7 @@ Delete the lamp under **Settings → Devices & services → Yeelight Bluetooth**
 
 ## Contributing
 
-Bug reports, Candela test reports and pull requests are welcome. Run the tests with `pip install -r requirements-dev.txt` and `pytest` (Linux or WSL). The hardware test checklist is in [docs/hardware-test.md](docs/hardware-test.md).
+Bug reports, Candela test reports and pull requests are welcome. Run the tests with `pip install -r requirements-dev.txt` and `pytest` (Linux or WSL). The hardware test checklist is in [docs/hardware-test.md](https://github.com/V4n1X/ha_yeelight_bt/blob/main/docs/hardware-test.md).
 
 Please keep personal data such as Bluetooth addresses, host names and tokens out of the repository. After cloning, enable the checks with `git config core.hooksPath .githooks`; your own patterns can be added to `.git/info/private-patterns`, which is never committed. The same checks run in CI.
 
@@ -169,4 +169,4 @@ Please keep personal data such as Bluetooth addresses, host names and tokens out
 
 Based on [hcoohb/hass-yeelightbt](https://github.com/hcoohb/hass-yeelightbt) by [@hcoohb](https://github.com/hcoohb), originally inspired by [python-yeelightbt](https://github.com/rytilahti/python-yeelightbt) by Teemu Rytilahti, with community work from [#79](https://github.com/hcoohb/hass-yeelightbt/pull/79), [#80](https://github.com/hcoohb/hass-yeelightbt/pull/80), [#81](https://github.com/hcoohb/hass-yeelightbt/issues/81) and the [mhdsallal fork](https://github.com/mhdsallal/hass-yeelightbt).
 
-The code is licensed under the [MIT license](LICENSE). The product pictures belong to Yeelight, see [docs/images/NOTICE.md](docs/images/NOTICE.md). This project is not affiliated with Yeelight or Xiaomi.
+The code is licensed under the [MIT license](https://github.com/V4n1X/ha_yeelight_bt/blob/main/LICENSE). The product pictures belong to Yeelight, see [docs/images/NOTICE.md](https://github.com/V4n1X/ha_yeelight_bt/blob/main/docs/images/NOTICE.md). This project is not affiliated with Yeelight or Xiaomi.

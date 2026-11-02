@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.1.1
+
+- README: the logo, the lamp pictures and the version and license badges now also show in the Marketplace/HACS (absolute links instead of relative ones).
+
 ## v2.1.0
 
 Requires Home Assistant 2026.10 or newer, tested with 2026.10 and 2026.11.
