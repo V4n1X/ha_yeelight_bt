@@ -60,18 +60,14 @@ rules:
   dynamic-devices:
     status: exempt
     comment: One config entry is one lamp.
-  entity-category:
-    status: exempt
-    comment: The only entity is the light itself.
+  entity-category: done
   entity-device-class:
     status: exempt
-    comment: Light entities have no device class.
+    comment: The entities are a light without device class and configuration switches/times.
   entity-disabled-by-default:
     status: exempt
-    comment: The only entity is the light itself.
-  entity-translations:
-    status: exempt
-    comment: The light is the main feature of the device and uses the device name.
+    comment: The night-light entities are part of the device's normal configuration.
+  entity-translations: done
   exception-translations: done
   icon-translations: done
   reconfiguration-flow: done

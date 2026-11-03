@@ -24,6 +24,16 @@ Note the setup: Home Assistant version, integration version, local adapter or pr
 - [ ] `light.turn_on` with `brightness: 0` turns the lamp off.
 - [ ] Fast slider changes do not get the lamp stuck.
 
+### Night light
+
+- [ ] The switch and both times show the lamp's window instead of `unavailable`.
+- [ ] Switching the night light on and off in Home Assistant changes it in the Yeelight app (or after re-adding the lamp there).
+- [ ] Changing a time keeps the switch state and the other time.
+- [ ] A window that crosses midnight (21:00–07:00) is active in the morning.
+- [ ] Turning the lamp on inside the window: orange at 1 %, also from the lamp's own button.
+- [ ] Changing the window in the Yeelight app shows up in Home Assistant after the next connect.
+- [ ] Through a backend without notifications: the three entities stay `unavailable`, the light keeps working.
+
 ### State and connection
 
 - [ ] Changing the lamp with its own touch controls shows up in HA within 30 s.

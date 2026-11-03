@@ -29,6 +29,7 @@ except ImportError:
 
 from custom_components.yeelight_bt import yeelightbt
 from custom_components.yeelight_bt.yeelightbt import (
+    CMD_GETNIGHTLIGHT,
     CMD_GETSTATE,
     CMD_GETVER,
     CMD_PAIR,
@@ -49,6 +50,8 @@ BEDSIDE_VERSION_FRAME = bytes.fromhex("435d02200122312238233004030404040300")
 # Gingko examples follow the APK's r3.f0.G1 layout; no Candela capture is available.
 CANDELA_STATE_FRAME = bytes.fromhex("434501500207080000000000000000000000")
 CANDELA_VERSION_FRAME = b"\x43\x5d2.2.0\x00".ljust(18, b"\x00")
+# Night light off, 00:00-05:00 (the factory state of the test lamp), BCD bytes.
+NIGHT_LIGHT_FRAME = bytes.fromhex("437100010000050000000000000000000000")
 
 __all__ = ["MockConfigEntry", "async_fire_time_changed", "mock_restore_cache"]
 
@@ -132,6 +135,9 @@ class FakeLampClient:
         self.fail_writes = fail_writes
         self.writes: list[bytes] = []
         self.notify_calls = 0
+        self.night_light = bytearray(NIGHT_LIGHT_FRAME)
+        # Delay of the 43 71 answer, to model a slow lamp
+        self.night_light_delay = 0.0
         self.is_connected = True
         self.disconnected_callback: Callable[[Any], None] | None = None
         self._handler: Callable[[Any, bytearray], None] | None = None
@@ -174,6 +180,13 @@ class FakeLampClient:
                 None,
                 bytearray(self.version_frame),
             )
+        elif data[1] == CMD_GETNIGHTLIGHT and self.night_light is not None:
+            # A copy: the answer must show the window at the time of the query
+            answer = bytearray(self.night_light)
+            if self.night_light_delay:
+                loop.call_later(self.night_light_delay, self._handler, None, answer)
+            else:
+                loop.call_soon(self._handler, None, answer)
 
     async def disconnect(self) -> None:
         self.is_connected = False

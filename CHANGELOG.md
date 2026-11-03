@@ -1,5 +1,31 @@
 # Changelog
 
+## v2.3.0
+
+Requires Home Assistant 2026.10 or newer, tested with 2026.10 and 2026.11.
+
+### Bedside
+
+- **New: night light.** The lamp's night-light window is shown as a switch
+  (*Night light*) and two times (*Night light start*, *Night light end*), both
+  read from the lamp when Home Assistant connects. While the window is active,
+  a plain turn-on comes up orange at 1 % instead of the last colour; a turn-on
+  with brightness or colour overrides that.
+- The window may cross midnight (factory state: off, 00:00–05:00). Changing one
+  time keeps the other one and the switch state.
+- The night-light entities need a Bluetooth backend that supports notifications:
+  without one the lamp cannot report the window, and every write sends all
+  fields, which would overwrite unknown times. They stay `unavailable` there.
+- Tested with a real Bedside in Home Assistant: the window is read when
+  connecting and after a reload, changing one time keeps the other fields,
+  and the lamp behaves as described inside an active window.
+
+### Development
+
+- Protocol notes: the night-light commands are mapped to their Home Assistant
+  entities.
+- Tests for the night-light commands, the notification parser and the entities.
+
 ## v2.2.0
 
 Requires Home Assistant 2026.10 or newer, tested with 2026.10 and 2026.11.

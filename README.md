@@ -35,6 +35,7 @@ Control the Yeelight **Bedside lamp** and the **Candela** from Home Assistant: l
 | Bluetooth name | `XMCTD_*` | `yeelight_ms*` |
 | On / off, brightness 1–100 % | ✓ | ✓ |
 | Color, color temperature 1700–6500 K | ✓ | – |
+| Night light with switch and start/end time | ✓ | – |
 | Changes made on the lamp | shown immediately | shown after confirmed setup authorization with a notification-capable backend; otherwise the last state sent is shown |
 | Status | **supported**, tested with real hardware | **experimental** |
 
@@ -81,6 +82,20 @@ Afterwards, do not connect the lamp to the Yeelight app anymore. **Reconfigure**
 - On every connection Home Assistant sets the **Bedside clock** to its local time, like the Yeelight app does. The lamp's own timers use this clock.
 - If a lamp no longer accepts Home Assistant (for example after it was deleted in the Yeelight app or reset), a **repair issue** asks you to switch it on and push its button while it pulses.
 - The device page offers **diagnostics** with the lamp state and the adapter or proxy in use.
+
+### Night light
+
+The Bedside has a night-light window. Set it with the **Night light** switch and
+the **Night light start** and **Night light end** configuration entities on the
+device page; the window may cross midnight (for example 21:00 to 07:00). While
+the window is active, the lamp switches on orange at 1 % instead of its last
+colour: a plain `light.turn_on` inside the window comes up orange at 1 %. A
+`light.turn_on` with brightness or colour overrides that, the lamp then uses
+the values it was given.
+
+Home Assistant reads the window from the lamp whenever it connects. The entities need a Bluetooth backend that
+supports notifications. Without one they stay `unavailable`: every write sends
+the complete window, so unknown times would be overwritten.
 
 **Known limitations**
 

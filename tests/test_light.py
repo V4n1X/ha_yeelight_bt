@@ -47,6 +47,7 @@ from custom_components.yeelight_bt.diagnostics import (
 from custom_components.yeelight_bt.yeelightbt import (
     CMD_BRIGHTNESS,
     CMD_DELETE_AUTH,
+    CMD_GETNIGHTLIGHT,
     CMD_GETSTATE,
     CMD_PAIR,
     CMD_POWER,
@@ -345,7 +346,13 @@ async def test_bedside_reconnect_keeps_confirmed_feedback(
         )
         assert ATTR_ASSUMED_STATE not in hass.states.get("light.lamp").attributes
     assert feedback and all(value is True for value in feedback)
-    assert client.commands() == [CMD_PAIR, CMD_SETTIME, CMD_BRIGHTNESS, CMD_BRIGHTNESS]
+    assert client.commands() == [
+        CMD_PAIR,
+        CMD_SETTIME,
+        CMD_GETNIGHTLIGHT,
+        CMD_BRIGHTNESS,
+        CMD_BRIGHTNESS,
+    ]
 
 
 async def test_unreachable_at_startup(
@@ -413,6 +420,11 @@ async def test_diagnostics(hass: HomeAssistant, connector, lamp_visible: None) -
     assert diag["lamp"]["versions"] == (2231, 2238, 2330)
     assert diag["lamp"]["firmware_version"] == "2231-2238-2330"
     assert diag["lamp"]["temperature"] == 4080
+    assert diag["lamp"]["night_light"] == {
+        "enabled": False,
+        "start": "00:00:00",
+        "end": "05:00:00",
+    }
     assert set(diag["connection_via"]) == {"source", "name"}
 
 

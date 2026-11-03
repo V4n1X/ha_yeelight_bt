@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from datetime import datetime
+from contextlib import suppress
+from dataclasses import dataclass
+from datetime import datetime, time as dt_time
 import enum
 import logging
 import re
@@ -51,6 +53,9 @@ CMD_GETVER = 0x5C
 RES_GETVER = 0x5D
 CMD_SETTIME = 0x60
 RES_GETTIME = 0x62
+CMD_SETNIGHTLIGHT = 0x6F
+CMD_GETNIGHTLIGHT = 0x70
+RES_NIGHTLIGHT = 0x71
 CMD_DELETE_AUTH = 0x72
 
 PAIR_REQUESTED = 0x01
@@ -82,6 +87,8 @@ OPERATION_TIMEOUT = PAIR_BUTTON_TIMEOUT + 60.0
 # "yeelight_ms" or "yeelight_ms" with a suffix, like the Homey Candela app
 CANDELA_NAME = re.compile(r"^yeelight_ms(?:$|[_ -])", re.IGNORECASE)
 RETRY_DELAY = 0.5
+# Wait for the 43 71 answer to a night-light query (43 70) before using the value
+NIGHT_LIGHT_READ_TIMEOUT = 2.0
 # Each attempt may take up to 20 s (bleak-retry-connector), so an unreachable
 # lamp fails within about a minute.
 CONNECT_ATTEMPTS = 3
@@ -115,7 +122,33 @@ class YeelightConnectionError(YeelightError):
     """Raised when no connection could be established (after retries)."""
 
 
+@dataclass(frozen=True)
+class NightLight:
+    """The night-light window of a Bedside lamp.
+
+    The lamp also stores a brightness for the window; the Yeelight app always
+    sends 1 % and offers no setting, so it is not part of this state.
+    """
+
+    enabled: bool
+    start: dt_time
+    end: dt_time
+
+
 _LOGGER = logging.getLogger(__name__)
+
+
+def _to_bcd(value: int) -> int:
+    """Encode a two-digit decimal number as one BCD byte (21 -> 0x21)."""
+    return ((value // 10) << 4) | (value % 10)
+
+
+def _from_bcd(value: int) -> int:
+    """Decode a BCD byte, raising ValueError for digits outside 0-9."""
+    tens, ones = value >> 4, value & 0x0F
+    if tens > 9 or ones > 9:
+        raise ValueError(f"not a BCD byte: 0x{value:02x}")
+    return tens * 10 + ones
 
 
 def model_from_name(ble_name: str | None) -> str:
@@ -175,6 +208,8 @@ class Lamp:
         )
         self.versions: tuple[int, ...] | None = None
         self.firmware_version: str | None = None
+        # The night-light window, None until the lamp reported it (43 71)
+        self._night_light: NightLight | None = None
 
         # store func to call on state received:
         self._state_callbacks: list[Callable[[], None]] = []
@@ -182,6 +217,13 @@ class Lamp:
         self._lock = asyncio.Lock()
         self._pair_resp_event = asyncio.Event()
         self._pair_result: int | None = None
+        # Set when an accepted 43 71 answer arrived
+        self._night_light_event = asyncio.Event()
+        # Incremented by every successful write. Each 43 70 query is queued with
+        # the value it was sent under; its answer then describes the window
+        # before a write that happened meanwhile and must not undo that write.
+        self._night_light_generation = 0
+        self._night_light_pending: list[int] = []
         # The lamp no longer knows our identifier and waits for its button
         self._pairing_requested = False
         self._notify_active = False
@@ -263,9 +305,16 @@ class Lamp:
         self._client = None
         self._conn = Conn.DISCONNECTED
         self._notify_active = False
+        # Answers of queries sent on this link can no longer arrive
+        self._forget_night_light_queries()
         # The lamp stays available: the next command or poll reconnects and
         # only a failure there marks it unavailable.
         self.run_state_changed_cb()
+
+    def _forget_night_light_queries(self) -> None:
+        """Drop pending 43 70 queries whose link is gone."""
+        self._night_light_pending.clear()
+        self._night_light_event.clear()
 
     # ---- BLE device handling ----
     def set_ble_device(self, ble_device: BLEDevice) -> None:
@@ -343,7 +392,25 @@ class Lamp:
             await self._write(client, self._time_command(self._clock()))
         if self._notify_active and self.firmware_version is None:
             await self._write(client, struct.pack("BB16x", COMMAND_STX, CMD_GETVER))
+        if self._notify_active and self._model != MODEL_CANDELA:
+            # The state cannot be assumed without notifications: every write
+            # sends all fields, so unknown times would be overwritten.
+            await self._query_night_light(client)
         return client
+
+    async def _query_night_light(self, client: BleakClient) -> None:
+        """Send 43 70 00 and queue the generation the query belongs to."""
+        self._night_light_event.clear()
+        self._night_light_pending.append(self._night_light_generation)
+        await self._write(client, self._night_light_query())
+
+    async def _async_await_night_light(self) -> None:
+        """Wait (best effort) for the answers to all pending queries."""
+        with suppress(TimeoutError):
+            async with asyncio.timeout(NIGHT_LIGHT_READ_TIMEOUT):
+                while self._night_light_pending:
+                    await self._night_light_event.wait()
+                    self._night_light_event.clear()
 
     @staticmethod
     def _time_command(now: datetime) -> bytes:
@@ -357,8 +424,33 @@ class Lamp:
             now.month,
             min(99, max(0, now.year - 2000)),
         )
-        bcd = (int(f"{value:02d}", 16) for value in fields)
-        return bytes((COMMAND_STX, CMD_SETTIME, *bcd)).ljust(18, b"\x00")
+        return bytes((COMMAND_STX, CMD_SETTIME, *map(_to_bcd, fields))).ljust(
+            18, b"\x00"
+        )
+
+    @staticmethod
+    def _night_light_command(night_light: NightLight) -> bytes:
+        """43 6F with enabled, the app's fixed brightness 1 %, start and end (BCD).
+
+        Times may cross midnight (21:00-07:00).
+        """
+        return bytes(
+            (
+                COMMAND_STX,
+                CMD_SETNIGHTLIGHT,
+                0x01 if night_light.enabled else 0x00,
+                0x01,
+                _to_bcd(night_light.start.hour),
+                _to_bcd(night_light.start.minute),
+                _to_bcd(night_light.end.hour),
+                _to_bcd(night_light.end.minute),
+            )
+        ).ljust(18, b"\x00")
+
+    @staticmethod
+    def _night_light_query() -> bytes:
+        """43 70 00, the lamp answers with 43 71."""
+        return struct.pack("BBB15x", COMMAND_STX, CMD_GETNIGHTLIGHT, 0x00)
 
     async def _start_notify(self, client: BleakClient) -> None:
         previous_feedback = self._has_state_feedback
@@ -423,6 +515,8 @@ class Lamp:
         self._client = None
         self._conn = Conn.DISCONNECTED
         self._notify_active = False
+        # Answers of queries sent on the old link can no longer arrive
+        self._forget_night_light_queries()
         if client is None:
             return
         try:
@@ -472,45 +566,48 @@ class Lamp:
         retried again, establish_connection already did.
         """
         async with self._lock:
-            if (
-                not self.is_connected
-                and self._last_connect_failure is not None
-                and time.monotonic() - self._last_connect_failure
-                < CONNECT_FAILURE_HOLDOFF
-            ):
-                raise YeelightConnectionError(f"{self._mac} is not reachable")
-            for attempt in (1, 2):
-                try:
-                    async with asyncio.timeout(OPERATION_TIMEOUT):
-                        client = await self._ensure_connected()
-                        if bits is not None:
-                            await self._write(client, bits)
-                except (YeelightPairingError, YeelightConnectionError) as err:
-                    await self._disconnect_client()
-                    self._set_available(False, str(err))
-                    raise
-                except RETRY_EXCEPTIONS as err:
-                    await self._disconnect_client()
-                    if attempt == 1:
-                        _LOGGER.debug(
-                            "%s: command failed (%s: %s), retrying",
-                            self._mac,
-                            type(err).__name__,
-                            err,
-                        )
-                        await asyncio.sleep(RETRY_DELAY)
-                        continue
-                    self._set_available(False, repr(err))
-                    raise YeelightError(
-                        f"Communication with {self._mac} failed: {err!r}"
-                    ) from err
-                except asyncio.CancelledError:
-                    await self._disconnect_client()
-                    raise
-                break
-            self._set_available(True)
-            if wait_notif:
-                await asyncio.sleep(wait_notif)
+            await self._send_cmd(bits, wait_notif)
+
+    async def _send_cmd(self, bits: bytes | None, wait_notif: float = 0.0) -> None:
+        """Send one command (must be called with the lock held)."""
+        if (
+            not self.is_connected
+            and self._last_connect_failure is not None
+            and time.monotonic() - self._last_connect_failure < CONNECT_FAILURE_HOLDOFF
+        ):
+            raise YeelightConnectionError(f"{self._mac} is not reachable")
+        for attempt in (1, 2):
+            try:
+                async with asyncio.timeout(OPERATION_TIMEOUT):
+                    client = await self._ensure_connected()
+                    if bits is not None:
+                        await self._write(client, bits)
+            except (YeelightPairingError, YeelightConnectionError) as err:
+                await self._disconnect_client()
+                self._set_available(False, str(err))
+                raise
+            except RETRY_EXCEPTIONS as err:
+                await self._disconnect_client()
+                if attempt == 1:
+                    _LOGGER.debug(
+                        "%s: command failed (%s: %s), retrying",
+                        self._mac,
+                        type(err).__name__,
+                        err,
+                    )
+                    await asyncio.sleep(RETRY_DELAY)
+                    continue
+                self._set_available(False, repr(err))
+                raise YeelightError(
+                    f"Communication with {self._mac} failed: {err!r}"
+                ) from err
+            except asyncio.CancelledError:
+                await self._disconnect_client()
+                raise
+            break
+        self._set_available(True)
+        if wait_notif:
+            await asyncio.sleep(wait_notif)
 
     # ---- properties ----
     @property
@@ -574,6 +671,11 @@ class Lamp:
     def color(self) -> tuple[int, int, int]:
         return self._rgb
 
+    @property
+    def night_light(self) -> NightLight | None:
+        """The night-light window, None until the lamp reported it (43 71)."""
+        return self._night_light
+
     def restore_state(self, is_on: bool, brightness: int | None) -> None:
         """Restore the last known state for lamps without state feedback."""
         self._is_on = is_on
@@ -619,6 +721,62 @@ class Lamp:
         _LOGGER.debug("Send Cmd: Turn Off")
         await self.send_cmd(bits)
         self._is_on = False
+
+    async def set_night_light(
+        self,
+        enabled: bool | None = None,
+        start: dt_time | None = None,
+        end: dt_time | None = None,
+    ) -> None:
+        """Set the night-light window; None keeps the value read from the lamp.
+
+        The lamp answers only with a generic 43 82 acknowledgement, so the state
+        is updated locally. Merging and writing happen under the lock: a second
+        change running right behind keeps the fields of the first one.
+        """
+        async with self._lock:
+            current = await self._async_current_night_light()
+            if current is None:
+                raise YeelightError("The lamp has not reported its night light yet")
+            night_light = NightLight(
+                enabled=current.enabled if enabled is None else enabled,
+                start=current.start if start is None else start,
+                end=current.end if end is None else end,
+            )
+            _LOGGER.debug(
+                "Send Cmd: Night light %s %s-%s",
+                "on" if night_light.enabled else "off",
+                night_light.start.strftime("%H:%M"),
+                night_light.end.strftime("%H:%M"),
+            )
+            await self._send_cmd(self._night_light_command(night_light))
+            # Later answers describe the window from before this write
+            self._night_light_generation += 1
+            self._night_light = night_light
+        self.run_state_changed_cb()
+
+    async def _async_current_night_light(self) -> NightLight | None:
+        """The window to merge a change into (must be called with the lock held).
+
+        A connection established now queries the lamp; its answer describes the
+        window as it is, while the cached one may be outdated by changes in the
+        Yeelight app. Waiting for it keeps a stale answer from undoing the write.
+        """
+        if not self.is_connected:
+            await self._send_cmd(None)
+        elif self._night_light_pending:
+            # An earlier query was never answered: ask again, its answer would
+            # otherwise arrive after the write and describe the old window.
+            client = self._client
+            assert client is not None
+            await self._query_night_light(client)
+        if not self._notify_active:
+            # A backend without notifications cannot confirm the window: the
+            # cached one may be outdated and must not be written back.
+            return None
+        if self._night_light_pending:
+            await self._async_await_night_light()
+        return self._night_light
 
     # set_brightness/temperature/color do NOT send a notification back and are
     # ignored by a lamp that is off (or still powering on, about 1 s).
@@ -764,6 +922,47 @@ class Lamp:
             elif paired and self._pairing_requested:
                 self._pairing_requested = False
                 self.run_state_changed_cb()
+
+        elif res_type == RES_NIGHTLIGHT:
+            if len(data) < 8:
+                _LOGGER.debug(
+                    "%s: invalid night light response 0x%s", self._mac, data.hex()
+                )
+                return
+            try:
+                start = dt_time(_from_bcd(data[4]), _from_bcd(data[5]))
+                end = dt_time(_from_bcd(data[6]), _from_bcd(data[7]))
+            except ValueError:
+                _LOGGER.debug(
+                    "%s: invalid night light response 0x%s", self._mac, data.hex()
+                )
+                return
+            # Each response answers the oldest pending query. A query from
+            # before the last write describes the window before it.
+            query_generation = (
+                self._night_light_pending.pop(0)
+                if self._night_light_pending
+                else self._night_light_generation
+            )
+            self._night_light_event.set()
+            if query_generation < self._night_light_generation:
+                _LOGGER.debug(
+                    "%s: ignoring stale night light response 0x%s",
+                    self._mac,
+                    data.hex(),
+                )
+                return
+            self._night_light = NightLight(
+                enabled=data[2] == 0x01, start=start, end=end
+            )
+            _LOGGER.debug(
+                "%s: night light %s, %s-%s",
+                self._mac,
+                "on" if self._night_light.enabled else "off",
+                start.strftime("%H:%M"),
+                end.strftime("%H:%M"),
+            )
+            self.run_state_changed_cb()
 
         elif res_type == RES_GETVER:
             try:

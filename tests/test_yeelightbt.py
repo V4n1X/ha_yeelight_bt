@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+import asyncio
+from datetime import datetime, time as dt_time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -13,11 +14,13 @@ from custom_components.yeelight_bt import yeelightbt
 from custom_components.yeelight_bt.yeelightbt import (
     CMD_BRIGHTNESS,
     CMD_DELETE_AUTH,
+    CMD_GETNIGHTLIGHT,
     CMD_GETSTATE,
     CMD_GETVER,
     CMD_PAIR,
     CMD_POWER,
     CMD_RGB,
+    CMD_SETNIGHTLIGHT,
     CMD_SETTIME,
     CMD_TEMP,
     COMMAND_STX,
@@ -30,6 +33,7 @@ from custom_components.yeelight_bt.yeelightbt import (
     PAIR_REQUESTED,
     PAIR_SUCCESS,
     Lamp,
+    NightLight,
     YeelightConnectionError,
     YeelightError,
     YeelightPairingError,
@@ -42,6 +46,7 @@ from .conftest import (
     CANDELA_ADDRESS,
     CANDELA_PAIRING_ID,
     CANDELA_STATE_FRAME,
+    NIGHT_LIGHT_FRAME,
     FakeLampClient,
     ble_device,
     frame,
@@ -113,8 +118,16 @@ async def test_bedside_sets_clock_on_connect(connector) -> None:
 
     await lamp.update()
 
-    assert client.commands()[:3] == [CMD_PAIR, CMD_SETTIME, CMD_GETVER]
+    assert client.commands()[:4] == [
+        CMD_PAIR,
+        CMD_SETTIME,
+        CMD_GETVER,
+        CMD_GETNIGHTLIGHT,
+    ]
     assert client.writes[1] == bytes.fromhex("436009052308001126000000000000000000")
+    # night light: read after the clock and firmware, the lamp answers 43 71
+    assert client.writes[3] == bytes.fromhex("437000000000000000000000000000000000")
+    assert lamp.night_light == NightLight(False, dt_time(0, 0), dt_time(5, 0))
 
 
 async def test_candela_clock_is_not_set(connector) -> None:
@@ -130,6 +143,287 @@ async def test_candela_clock_is_not_set(connector) -> None:
     await lamp.update()
 
     assert CMD_SETTIME not in client.commands()
+
+
+async def test_candela_does_not_read_night_light(connector) -> None:
+    """The legacy Candela path has no night-light window."""
+    client = FakeLampClient(model=MODEL_CANDELA)
+    connector(client)
+    lamp = Lamp(
+        ble_device(CANDELA_ADDRESS, "yeelight_ms"), pairing_id=CANDELA_PAIRING_ID
+    )
+
+    await lamp.update()
+
+    assert CMD_GETNIGHTLIGHT not in client.commands()
+    assert lamp.night_light is None
+
+
+async def test_night_light_not_read_without_notifications(connector) -> None:
+    """Without notifications the lamp answer would never arrive."""
+    client = FakeLampClient(notify=False)
+    connector(client)
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+
+    await lamp.update()
+
+    assert CMD_GETNIGHTLIGHT not in client.commands()
+    assert lamp.night_light is None
+
+
+async def test_night_light_is_read_again_on_reconnect(connector) -> None:
+    """The lamp may have been changed with the Yeelight app meanwhile."""
+    client = FakeLampClient()
+    connector(client)
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+    await lamp.update()
+    client.night_light = bytearray(
+        bytes((COMMAND_STX, 0x71, 0x01, 0x01, 0x21, 0x00, 0x07, 0x00))
+    )
+
+    client.disconnected_callback(client)
+    await lamp.update()
+
+    assert client.commands().count(CMD_GETNIGHTLIGHT) == 2
+    assert lamp.night_light == NightLight(True, dt_time(21, 0), dt_time(7, 0))
+
+
+def test_night_light_notification_parsing() -> None:
+    """43 71 has the same layout as the 43 6F command, times are BCD."""
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+    lamp.handle_notification(NIGHT_LIGHT_FRAME)
+    assert lamp.night_light == NightLight(False, dt_time(0, 0), dt_time(5, 0))
+
+    lamp.handle_notification(
+        bytes((COMMAND_STX, 0x71, 0x01, 0x05, 0x21, 0x30, 0x07, 0x00))
+    )
+    # the brightness byte (1 %) is not part of the state
+    assert lamp.night_light == NightLight(True, dt_time(21, 30), dt_time(7, 0))
+
+
+def test_invalid_night_light_notifications_are_ignored(caplog) -> None:
+    """Truncated frames and times outside BCD must not overwrite the state."""
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+    lamp.handle_notification(NIGHT_LIGHT_FRAME)
+    for packet in (
+        bytes.fromhex("4371000100000500")[:7],
+        bytes.fromhex("43710001"),
+        # 0x24 is not a BCD digit, 0x61 is not a valid hour
+        bytes((COMMAND_STX, 0x71, 0x00, 0x01, 0x24, 0x00, 0x05, 0x00)),
+        bytes((COMMAND_STX, 0x71, 0x00, 0x01, 0x00, 0x00, 0x61, 0x00)),
+    ):
+        lamp.handle_notification(packet)
+        assert lamp.night_light == NightLight(False, dt_time(0, 0), dt_time(5, 0))
+    assert "invalid night light response" in caplog.text
+
+
+async def test_set_night_light_sends_all_fields(connector) -> None:
+    """The lamp only acknowledges (43 82), the state is updated locally."""
+    client = FakeLampClient()
+    connector(client)
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+    await lamp.update()
+    calls = []
+    lamp.add_callback_on_state_changed(lambda: calls.append(lamp.night_light))
+
+    await lamp.set_night_light(True, dt_time(21, 0), dt_time(7, 0))
+
+    assert client.writes[-1] == bytes.fromhex(
+        "43 6f 01 01 21 00 07 00 00 00 00 00 00 00 00 00 00 00"
+    )
+    assert len(client.writes[-1]) == 18
+    assert lamp.night_light == NightLight(True, dt_time(21, 0), dt_time(7, 0))
+    assert calls[-1] == lamp.night_light
+
+
+async def test_set_night_light_keeps_unchanged_fields(connector) -> None:
+    """A single field change must not overwrite the times read from the lamp."""
+    client = FakeLampClient()
+    connector(client)
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+    await lamp.update()
+    lamp.handle_notification(
+        bytes((COMMAND_STX, 0x71, 0x01, 0x01, 0x22, 0x15, 0x06, 0x45))
+    )
+
+    await lamp.set_night_light(start=dt_time(23, 59))
+
+    assert client.writes[-1][:8] == bytes.fromhex("43 6f 01 01 23 59 06 45")
+    assert lamp.night_light == NightLight(True, dt_time(23, 59), dt_time(6, 45))
+
+    client.writes.clear()
+    await lamp.set_night_light(enabled=False)
+    assert client.writes[-1][:8] == bytes.fromhex("43 6f 00 01 23 59 06 45")
+    assert lamp.night_light == NightLight(False, dt_time(23, 59), dt_time(6, 45))
+
+
+async def test_set_night_light_requires_read_state(connector) -> None:
+    """Unknown times must never be sent, they would overwrite the lamp's."""
+    fake = connector(FakeLampClient(notify=False))
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+    await lamp.update()
+
+    with pytest.raises(YeelightError):
+        await lamp.set_night_light(True, dt_time(21, 0), dt_time(7, 0))
+    # only the connect and pairing, the window is never written
+    assert CMD_SETNIGHTLIGHT not in [
+        write[1] for client in fake.connections for write in client.writes
+    ]
+
+
+async def test_cached_window_is_not_written_after_losing_notifications(
+    connector,
+) -> None:
+    """A reconnect through a backend without notifications cannot refresh it."""
+    client = FakeLampClient()
+    fake = connector(client)
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+    await lamp.update()
+    assert lamp.night_light is not None
+    await lamp.disconnect()
+    client.notify = False
+
+    with pytest.raises(YeelightError):
+        await lamp.set_night_light(True)
+    # the fake still answers the pairing request through the old handler
+    await asyncio.sleep(0.1)
+    assert CMD_SETNIGHTLIGHT not in [
+        write[1] for c in fake.connections for write in c.writes
+    ]
+
+
+async def test_concurrent_night_light_updates_are_merged(connector) -> None:
+    """Two time entities changed together keep both values."""
+    client = FakeLampClient()
+    connector(client)
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+    await lamp.update()
+
+    # A write that yields to the loop, otherwise the first task would finish
+    # before the second one starts and nothing would be merged.
+    original_write = client.write_gatt_char
+
+    async def slow_write(uuid, data, response=None):
+        await asyncio.sleep(0)
+        await original_write(uuid, data, response)
+
+    client.write_gatt_char = slow_write  # type: ignore[method-assign]
+
+    await asyncio.gather(
+        lamp.set_night_light(start=dt_time(22, 15)),
+        lamp.set_night_light(end=dt_time(6, 30)),
+    )
+
+    assert lamp.night_light == NightLight(False, dt_time(22, 15), dt_time(6, 30))
+    assert client.writes[-1][:8] == bytes.fromhex("43 6f 00 01 22 15 06 30")
+
+
+async def test_late_readback_does_not_undo_a_write(connector) -> None:
+    """A 43 71 answer to the query of a new connection arrives after the write.
+
+    It describes the window from before the write. Overwriting the local state
+    with it would make the next change send the old window to the lamp.
+    """
+    client = FakeLampClient()
+    connector(client)
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+    await lamp.update()
+
+    # The app changed the window, then the connection dropped before HA read it
+    client.night_light = bytearray(
+        bytes((COMMAND_STX, 0x71, 0x01, 0x01, 0x17, 0x00, 0x06, 0x45))
+    )
+    client.night_light_delay = 0.05
+    client.disconnected_callback(client)
+
+    await lamp.set_night_light(start=dt_time(21, 0))
+
+    # the write used the window the lamp reports (17:00-06:45), not the cache
+    assert client.writes[-1][:8] == bytes.fromhex("43 6f 01 01 21 00 06 45")
+    assert lamp.night_light == NightLight(True, dt_time(21, 0), dt_time(6, 45))
+
+    # the delayed answer of the connection's query must not replace that
+    await asyncio.sleep(0.2)
+    assert lamp.night_light == NightLight(True, dt_time(21, 0), dt_time(6, 45))
+
+
+async def test_stale_readback_after_a_write_is_ignored(connector, caplog) -> None:
+    """An answer to a query sent before a write must not undo that write.
+
+    Reached when the lamp answers slower than NIGHT_LIGHT_READ_TIMEOUT: the
+    write goes out first, the late answer still describes the old window.
+    """
+    client = FakeLampClient()
+    connector(client)
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+    await lamp.update()
+
+    # The app changed the window and the lamp answers slowly
+    client.night_light = bytearray(
+        bytes((COMMAND_STX, 0x71, 0x01, 0x01, 0x17, 0x00, 0x06, 0x45))
+    )
+    client.night_light_delay = 0.05
+    client.disconnected_callback(client)
+    with patch.object(yeelightbt, "NIGHT_LIGHT_READ_TIMEOUT", 0):
+        await lamp.set_night_light(start=dt_time(21, 0))
+    written = lamp.night_light
+    # merged from the cache: the connection's answer had not arrived yet
+    assert written == NightLight(False, dt_time(21, 0), dt_time(5, 0))
+
+    # The answer of the connection's query arrives afterwards
+    await asyncio.sleep(0.2)
+    assert lamp.night_light == written
+    assert "ignoring stale night light response" in caplog.text
+
+
+async def test_a_dropped_link_forgets_pending_queries(connector) -> None:
+    """A query lost with its link must not shift every later answer.
+
+    Only the lamp or proxy disconnects here, so _disconnect_client never runs.
+    A leftover query would make the next fresh answer look stale, keep the old
+    window in Home Assistant and make every later write use the stale cache.
+    """
+    client = FakeLampClient()
+    connector(client)
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+    await lamp.update()
+
+    # A query goes out, its answer never arrives, then the lamp drops the link
+    client._handler = None  # type: ignore[assignment]
+    await lamp._query_night_light(client)  # type: ignore[arg-type]
+    client.disconnected_callback(client)
+    assert lamp._night_light_pending == []
+    client._handler = lamp._notification_handler  # type: ignore[assignment]
+
+    await lamp.set_night_light(enabled=True)
+
+    # The window is changed in the app, the next connection reads it
+    client.night_light = bytearray(
+        bytes((COMMAND_STX, 0x71, 0x01, 0x01, 0x21, 0x00, 0x07, 0x00))
+    )
+    client.disconnected_callback(client)
+    await lamp.update()
+    await asyncio.sleep(0.1)
+
+    assert lamp.night_light == NightLight(True, dt_time(21, 0), dt_time(7, 0))
+    assert lamp._night_light_pending == []
+
+
+async def test_a_readback_after_the_write_is_accepted(connector) -> None:
+    """A query answered after the write wins: it is the lamp's current state."""
+    client = FakeLampClient()
+    connector(client)
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+    await lamp.update()
+    await lamp.set_night_light(start=dt_time(21, 0))
+
+    client.night_light = bytearray(
+        bytes((COMMAND_STX, 0x71, 0x01, 0x01, 0x17, 0x00, 0x06, 0x45))
+    )
+    await lamp.send_cmd(lamp._night_light_query())
+    await asyncio.sleep(0.05)
+
+    assert lamp.night_light == NightLight(True, dt_time(17, 0), dt_time(6, 45))
 
 
 @pytest.mark.parametrize("answer", [PAIR_REQUESTED, PAIR_LAMP_OFF])

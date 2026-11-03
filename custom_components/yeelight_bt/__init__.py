@@ -25,7 +25,7 @@ from .yeelightbt import (
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.LIGHT]
+PLATFORMS = [Platform.LIGHT, Platform.SWITCH, Platform.TIME]
 # Removing an entry waits at most this long for the lamp to drop our authorization.
 UNPAIR_TIMEOUT = 30
 

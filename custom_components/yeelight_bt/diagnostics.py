@@ -40,6 +40,13 @@ async def async_get_config_entry_diagnostics(
             "brightness": lamp.brightness,
             "temperature": lamp.temperature,
             "color": lamp.color,
+            "night_light": None
+            if lamp.night_light is None
+            else {
+                "enabled": lamp.night_light.enabled,
+                "start": lamp.night_light.start.isoformat(),
+                "end": lamp.night_light.end.isoformat(),
+            },
         },
         "connection_via": {
             "source": source,

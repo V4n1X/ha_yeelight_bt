@@ -7,6 +7,19 @@
       "candela": {
         "default": "mdi:candle"
       }
+    },
+    "switch": {
+      "night_light": {
+        "default": "mdi:weather-night"
+      }
+    },
+    "time": {
+      "night_light_start": {
+        "default": "mdi:clock-start"
+      },
+      "night_light_end": {
+        "default": "mdi:clock-end"
+      }
     }
   }
 }

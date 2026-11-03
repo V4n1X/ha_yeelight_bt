@@ -312,6 +312,24 @@ precedence where they differ.
 - **Night-light** (`43 6F`): `enabled`, `01`, start hour, start minute, end
   hour, end minute. Times are BCD decimal (`%02d`). `43 71` reports the same
   fields; byte 1 is brightness.
+
+  Home Assistant maps this to a switch and two time entities, all of the
+  *configuration* category, and only for the Bedside:
+
+  | Frame | Entity |
+  | --- | --- |
+  | `43 6F` byte 2 | `switch.<lamp>_night_light` (`01` on, `00` off) |
+  | `43 6F` bytes 4–5 | `time.<lamp>_night_light_start` |
+  | `43 6F` bytes 6–7 | `time.<lamp>_night_light_end` |
+  | `43 6F` byte 3 | not exposed, always sent as `01` (1 %), as the app does |
+  | `43 70 00` → `43 71` | read on every connection, updates all three entities |
+
+  Every write sends the complete frame, so a single change keeps the values
+  read from the lamp. This is why the entities are unavailable when the backend
+  cannot subscribe: without `43 71` the other fields are unknown. The window
+  may cross midnight; the lamp's clock (set on every connection) decides when
+  it is active.
+
 - **Delay-off** (`43 7F`): Cherry sends mode `3` (enable) or `4` (disable)
   plus minutes. Gingko sends mode `1`/`2`, a literal `02`, then the value.
   `43 81` reports the state; Cherry uses bytes 1/3/4, Gingko uses bytes 2/3.
@@ -580,6 +598,16 @@ the Candela.
 | Records | `43 8C 00` → `43 8D` … `43 91` | Five frames of counters, meaning unknown, not useful for Home Assistant. |
 | Command response | `43 82 <command> <status>` | Status `01` = done (seen for `43 54`, `43 74`), `02` = nothing stored (wake-up read). |
 | Factory reset | `43 74 00` | Acknowledged with `43 82 43 74 01`, then the lamp **drops the connection** and its authorization: the next `43 67 02` needs the button. Afterwards the lamp is on (stored colour `FF00CA`, 100 %), name empty, night-light off 00:00–05:00, delay-off 15 min, no alarms or wake-up, no beacons, stored entries with `0x65`. The clock keeps running. |
+
+**Night light in Home Assistant.** The integration exposes the window as a
+configuration switch and two configuration times (start, end): the switch sends
+`43 6F` with `en` toggled, each time sends the complete frame with the other
+fields taken from the last readback. The brightness byte stays `01`, matching
+the app. The window is read with `43 70 00` on every connection and after a
+reconnect; frames that are too short or carry non-BCD times are ignored. Because
+a write always contains all fields, the entities are unavailable on backends
+without notifications, where the readback never arrives; the light entity is
+unaffected. The Candela gets no night-light entities.
 
 **Pairing and deleting the lamp in the app.** The app's pairing frame is `43 67 02`,
 byte-identical to the integration. The lamp answers `43 63 04` when the identifier

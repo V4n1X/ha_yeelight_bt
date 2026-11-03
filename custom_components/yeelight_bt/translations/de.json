@@ -64,6 +64,21 @@
       }
     }
   },
+  "entity": {
+    "switch": {
+      "night_light": {
+        "name": "Nachtlicht"
+      }
+    },
+    "time": {
+      "night_light_start": {
+        "name": "Nachtlicht Beginn"
+      },
+      "night_light_end": {
+        "name": "Nachtlicht Ende"
+      }
+    }
+  },
   "issues": {
     "unknown_model": {
       "title": "Modell von {name} nicht erkannt",
