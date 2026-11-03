@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from homeassistant.components import bluetooth
@@ -10,13 +11,23 @@ from homeassistant.const import CONF_MAC, EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.util import dt as dt_util
 
 from .const import CONF_MODEL, CONF_PAIRING_ID, DOMAIN
-from .yeelightbt import MODEL_CANDELA, MODEL_UNKNOWN, MODELS, Lamp, model_from_name
+from .yeelightbt import (
+    MODEL_CANDELA,
+    MODEL_UNKNOWN,
+    MODELS,
+    Lamp,
+    YeelightError,
+    model_from_name,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = [Platform.LIGHT]
+# Removing an entry waits at most this long for the lamp to drop our authorization.
+UNPAIR_TIMEOUT = 30
 
 type YeelightBTConfigEntry = ConfigEntry[Lamp]
 
@@ -57,16 +68,42 @@ async def async_setup_entry(hass: HomeAssistant, entry: YeelightBTConfigEntry) -
             )
     _async_update_model_issue(hass, entry, model)
 
-    pairing_id = entry.data.get(CONF_PAIRING_ID)
     lamp = Lamp(
         ble_device,
         model=model,
         ble_device_callback=lambda: bluetooth.async_ble_device_from_address(
             hass, address, connectable=True
         ),
-        pairing_id=(
-            bytes.fromhex(pairing_id) if model == MODEL_CANDELA and pairing_id else None
-        ),
+        pairing_id=_pairing_id(entry, model),
+        clock=dt_util.now,
+    )
+
+    pairing_issue = f"pairing_required_{entry.entry_id}"
+    ir.async_delete_issue(hass, DOMAIN, pairing_issue)
+    pairing_requested = False
+
+    @callback
+    def _async_update_pairing_issue() -> None:
+        """Ask for the lamp's button when it no longer accepts Home Assistant."""
+        nonlocal pairing_requested
+        if lamp.pairing_requested == pairing_requested:
+            return
+        pairing_requested = lamp.pairing_requested
+        if not pairing_requested:
+            ir.async_delete_issue(hass, DOMAIN, pairing_issue)
+            return
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            pairing_issue,
+            is_fixable=False,
+            severity=ir.IssueSeverity.ERROR,
+            translation_key="pairing_required",
+            translation_placeholders={"name": entry.title, "address": address},
+        )
+
+    entry.async_on_unload(
+        lamp.add_callback_on_state_changed(_async_update_pairing_issue)
     )
 
     @callback
@@ -107,6 +144,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: YeelightBTConfigEntry) -
     return True
 
 
+def _pairing_id(entry: YeelightBTConfigEntry, model: str | None) -> bytes | None:
+    """The stored Candela identifier; Bedside lamps use a fixed one."""
+    pairing_id = entry.data.get(CONF_PAIRING_ID)
+    return bytes.fromhex(pairing_id) if model == MODEL_CANDELA and pairing_id else None
+
+
 @callback
 def _async_update_model_issue(
     hass: HomeAssistant, entry: YeelightBTConfigEntry, model: str | None
@@ -130,9 +173,37 @@ def _async_update_model_issue(
 async def async_remove_entry(hass: HomeAssistant, entry: YeelightBTConfigEntry) -> None:
     """Clean up when the lamp is removed."""
     ir.async_delete_issue(hass, DOMAIN, f"unknown_model_{entry.entry_id}")
+    ir.async_delete_issue(hass, DOMAIN, f"pairing_required_{entry.entry_id}")
+    address = entry.data[CONF_MAC].upper()
+    model = entry.data.get(CONF_MODEL)
+    # Command-only Candela entries never authorized an identifier.
+    if model != MODEL_CANDELA or entry.data.get(CONF_PAIRING_ID):
+        await _async_unpair(hass, entry, address, model)
     # HA bluetooth reports a device only once per run; let the lamp be
     # discovered again so it can be re-added without a restart.
-    bluetooth.async_rediscover_address(hass, entry.data[CONF_MAC].upper())
+    bluetooth.async_rediscover_address(hass, address)
+
+
+async def _async_unpair(
+    hass: HomeAssistant, entry: YeelightBTConfigEntry, address: str, model: str | None
+) -> None:
+    """Remove the lamp's authorization of Home Assistant, if it can be reached.
+
+    The Bedside identifier is the one the Yeelight app uses as well, so this
+    also signs the lamp out of the app, like deleting it there does.
+    """
+    ble_device = bluetooth.async_ble_device_from_address(
+        hass, address, connectable=True
+    )
+    if ble_device is None:
+        _LOGGER.debug("%s is not reachable, its authorization stays", address)
+        return
+    lamp = Lamp(ble_device, model=model, pairing_id=_pairing_id(entry, model))
+    try:
+        async with asyncio.timeout(UNPAIR_TIMEOUT):
+            await lamp.unpair()
+    except (YeelightError, TimeoutError) as err:
+        _LOGGER.debug("Could not remove the authorization of %s: %s", address, err)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: YeelightBTConfigEntry) -> bool:

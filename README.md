@@ -68,8 +68,8 @@ Manual: extract `yeelight_bt.zip` from the [latest release](https://github.com/V
 
 Lamps in range show up as discovered under **Settings → Devices & services**; lamps without a name can be added with their MAC address. Home Assistant connects to the lamp before the setup finishes.
 
-- **Bedside**: if it was used with another device, [reset it](https://www.youtube.com/watch?v=PnjcOSgnbAM) first. When it **pulses** during the setup, push its small button within 30 seconds.
-- **Candela**: charge it and put the switch underneath it in the Bluetooth position. If it requests authorization, turn its cylinder within 30 seconds. Without an answer or confirmation, setup retries a connection for basic control. Backends without notification support use command-only operation directly.
+- **Bedside**: if it was used with another device, [reset it](https://www.youtube.com/watch?v=PnjcOSgnbAM) first. When it **pulses** during the setup, push its small button within 60 seconds. It only pulses while it is on: if nothing happens, switch it on at the lamp.
+- **Candela**: charge it and put the switch underneath it in the Bluetooth position. If it requests authorization, turn its cylinder within 60 seconds. Without an answer or confirmation, setup retries a connection for basic control. Backends without notification support use command-only operation directly.
 
 Afterwards, do not connect the lamp to the Yeelight app anymore. **Reconfigure** in the ⋮ menu of the lamp changes the model if it was detected wrongly.
 
@@ -78,6 +78,8 @@ Afterwards, do not connect the lamp to the Yeelight app anymore. **Reconfigure**
 - The **Bedside** pushes its state while connected and is asked for it every 30 s (can be turned off with *Enable polling* in the system options).
 - The **Candela** is also polled every 30 s for entries authorized during setup when notifications are available. Older entries and backends without notification support show the last state Home Assistant sent and restore it after a restart.
 - A lamp that cannot be reached becomes **unavailable** when a command or a supported 30 s update fails (after about a minute) and is retried every 30 s.
+- On every connection Home Assistant sets the **Bedside clock** to its local time, like the Yeelight app does. The lamp's own timers use this clock.
+- If a lamp no longer accepts Home Assistant (for example after it was deleted in the Yeelight app or reset), a **repair issue** asks you to switch it on and push its button while it pulses.
 - The device page offers **diagnostics** with the lamp state and the adapter or proxy in use.
 
 **Known limitations**
@@ -145,7 +147,7 @@ actions:
 ## Troubleshooting
 
 - **Not discovered or unavailable**: close the Yeelight app (or turn off Bluetooth on the phone), check that the lamp shows up in the **Bluetooth → Advertisement monitor**, and move the adapter or proxy closer. A Candela needs its switch in the Bluetooth position.
-- **Bedside does not react after a reset**: it pulses and waits for its button to be pushed.
+- **Bedside does not react after a reset or after it was deleted in the Yeelight app**: it waits to be paired again. Switch it on at the lamp; it pulses and waits for its button to be pushed.
 - **Bug reports**: enable *debug logging* on the integration page, reproduce the problem and attach the log to a [bug report](https://github.com/V4n1X/ha_yeelight_bt/issues/new?template=bug_report.yml), with Bluetooth addresses replaced by placeholders.
 
 ## Migrating from hcoohb/hass-yeelightbt
@@ -157,7 +159,7 @@ This project continues [hcoohb/hass-yeelightbt](https://github.com/hcoohb/hass-y
 
 ## Removing
 
-Delete the lamp under **Settings → Devices & services → Yeelight Bluetooth**, then remove the repository in the Marketplace/HACS. To use a Bedside with the Yeelight app again, [reset it](https://www.youtube.com/watch?v=PnjcOSgnbAM).
+Delete the lamp under **Settings → Devices & services → Yeelight Bluetooth**, then remove the repository in the Marketplace/HACS. When the lamp is in reach, deleting it also removes the pairing on the lamp, so adding it again needs its button. The Bedside shares this pairing with the Yeelight app: deleting it in Home Assistant signs it out of the app as well, and the other way round. To use a Bedside with the Yeelight app again, [reset it](https://www.youtube.com/watch?v=PnjcOSgnbAM) or add it in the app (switched on, push its button when it pulses).
 
 ## Contributing
 

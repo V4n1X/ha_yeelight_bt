@@ -1,7 +1,11 @@
 # Yeelight Android app 3.5.4 — BLE device and protocol notes
 
 Status: static APK reference, with the Bedside core commands additionally
-verified in the [2026-11-02 hardware run](hardware-test.md#2026-11-02-legacy-protocol-comparison-with-yeelight-apk-354).
+verified in the [2026-11-02 hardware run](hardware-test.md#2026-11-02-legacy-protocol-comparison-with-yeelight-apk-354)
+and the extended Bedside features (clock, night-light, timer, alarms, wake-up,
+colour flows, name, authorization) verified in the
+[2026-11-02/03 run](hardware-test.md#2026-11-0203-bedside-extended-legacy-features-and-app-capture)
+and described in section 5.5.
 
 This document describes the Bluetooth Low Energy (BLE) device families and
 protocols found in the Yeelight Android app `com.yeelight.cherry` 3.5.4
@@ -296,6 +300,9 @@ ignores them still needs hardware testing.
 
 ### 2.8 Name, night-light, delay and alarms
 
+Static description; for the Bedside the hardware results in section 5.5 take
+precedence where they differ.
+
 - **Name** (`43 51`): `d4.c.y()` → `d4.c.z()` always emits two chunks, each
   `01 <part> <length> <data>`: part `00` with up to 13 UTF-8 bytes
   (hex-encoded), then part `01` with the remainder, or an empty payload for
@@ -336,6 +343,8 @@ The legacy path also manages Yeelight remotes/beacons:
 - `43 82` — command response, echoing the original command and a status byte;
 - `EF 00` — beacon read complete;
 - `AE 00` / `AE 01` — beacon status off/on.
+
+On the Bedside both answers arrive padded to 18 bytes (section 5.5).
 
 `EF 00` and `AE 00`/`AE 01` are two-byte response codes outside the `43`
 command space. The app's notification dispatcher takes the first two bytes as
@@ -498,7 +507,11 @@ The legacy protocol contains commands for:
 - Candela battery/factory state.
 
 These are candidates for future integration features, but each needs hardware
-verification and a clear user-facing model.
+verification and a clear user-facing model. For the Bedside, the lamp clock,
+night-light, delay-off timer, alarms, wake-up light, colour flows, mode select and
+name, the beacon pairing mode and the factory reset were verified in the
+2026-11-02/03 hardware runs, see section 5.5. Adding remotes, the stored records,
+OTA and everything on the Candela are still open.
 
 ### 5.4 Local Legacy implementation update (2026-11-02)
 
@@ -534,6 +547,66 @@ clamp, so the integration retains its 1–100% range. The raw-GATT comparison
 passed 11 checks and the actual updated driver passed 7 checks; both restored
 the original lamp state. See [hardware-test.md](hardware-test.md) for the
 captured packet, readbacks and remaining hardware coverage limits.
+
+### 5.5 Bedside extended commands, verified on hardware and against the app (2026-11-02/03)
+
+Method: raw GATT probes from a PC (read-only queries first, then write, read
+back, restore) and an HCI snoop capture of the Yeelight app 3.5.4 on Android 16
+while each feature was set in the app UI. This section is hardware-verified for
+the Bedside unless an entry is marked as expected, APK-only or from the app
+capture, and it supersedes the static descriptions in 2.8 where they differ. All
+frames are padded to 18 bytes with zeros and shown in full; "payload offset"
+counts from the first byte after `43 <command>`. Nothing here is verified for
+the Candela.
+
+**Connection sequence of the app** (capture): CCCD write `01 00`, `43 67 02`
+(pairing), `43 5C 00` (version), `43 44 00` (state), `43 52 00` (name),
+`43 60 <time>` (sets the lamp clock), `43 80 00`, `43 47 FF`, `43 70 00`,
+`43 89 06`, `43 8C 00`, `43 4C 01`, `43 4C 02`, `43 64 00`.
+
+| Feature | Frames | Verified behaviour |
+| --- | --- | --- |
+| Lamp time | set `43 60 ss mm hh dd wd MM yy`, read `43 61 00` → `43 62` (same layout) | BCD. Weekday: Sunday = 0, Monday = 1 … Saturday = 6 (`d4.c.s` uses `Calendar.DAY_OF_WEEK − 1`; Monday and Tuesday also seen on the wire). The app sets the time on **every connect**. The lamp clock was 14 min off before the first write. A factory reset keeps the clock. |
+| Night-light | set `43 6F en 01 hh mm hh mm`, read `43 70 00` → `43 71` (same layout) | App sends BCD (21:00–07:00 = `01 01 21 00 07 00`). The lamp stores and echoes the bytes verbatim (a binary-encoded variant was echoed too), so the readback cannot tell BCD from binary; the lamp clock is BCD and the app sends BCD. The second byte is the night-light brightness per 2.8; the app always sends `01`. With the window 21:00–07:00 active, the app's power-on `43 40 01` at 00:14 lamp time was answered with `43 45 01 01 FF 98 00 00 01`: orange at 1 % instead of the previous colour at 100 % (capture). Factory state: off, 00:00–05:00. |
+| Delay-off timer | start `43 7F 03 <min>`, stop `43 7F 04 <min>`, read `43 80 00` → `43 81 01 <min> <state> <remaining s, 2 bytes BE>` | Minutes are binary (`0x14` = 20). State `01` = running, `02` = off. The remaining time counts down in seconds (1198 s after setting 20 min, 1131 s after 65 s). The app sends the last minutes value on stop; `04 00` also stops it. The lamp remembers the last duration. |
+| Alarm | set `43 46 slot hh mm ss mode rep gg gg act 00 en`, read `43 47 FF` → one `43 49` per stored alarm, then `43 49 FF` (the wake-up in slot 6 is not included), `43 47 <slot>` → one `43 49` without terminator, delete `43 48 <slot>` | Slot 1 (probe) and slot 2 (app) were written; the app offers five slots, so 1–5 is expected but 3–5 were not written. Slot 0 is ignored. Time fields BCD. `mode`: 1 once, 2 daily, 3 weekly. `rep`: mode 1: **day of the month (BCD) of the next run**. On hardware, two probe alarms with today's day and `act = 03` fired on time; the next-day rule (the app sends tomorrow's day when the time has passed today, and today's day when it deactivates the entry, hence `03` → `02` in the capture) comes from the app; mode 2: `00`; mode 3: weekday mask, bit 0 = Sunday … bit 6 = Saturday (Monday–Friday = `3E`). `gg gg`: gradual value, the app default `00 01` (the app parses only the low byte). With `00 05` the lamp was fully bright within a few seconds of the alarm time (seen by eye), so the value is not minutes; seconds or no effect cannot be told apart, and the state notification reports the target brightness at once. `act`: `03` switch on (fired on hardware), `04` switch off (APK only; the app also reads `01` as "on", a probe with `01` was stored). Payload offset 9 is `00` for alarms. `en`: `01` active, `00` inactive. The app deactivates by resending the entry with `en = 00` and does not delete. `43 48 <slot>` deletes silently. Source for `rep`/`act`: `LightAlarmDetailActivity.h0`, `LightAlarmActivity.Z`. |
+| Wake-up light | set `43 88 06 hh mm ss mode rep gg gg 01 01 en`, read `43 89 06` → `43 8A 06 …` | Fixed slot 6. The app sends the start time = wake time − 30 min and `gg gg` = `00 1E`, the same field as the alarm gradual value (its unit is open, see below). Disabled by `en = 00`. An empty slot answers `43 82 43 89 02`. Delete: `43 48 06` (what the app uses, `o3.a.e`) and `43 8B 06` each delete it on their own. |
+| Colour flow (stored) | save `43 7C 02 01 <interval s> 04 <4 × RGB>`, read `43 4C 02` → one `43 4D 02 <n> <02/04> 01 RR GG BB 00 <b> … <interval>` per step, then `43 4D FF` | Up to 4 steps. Factory contents: orange, yellow, green and blue steps at 2 s, each with `0x65` at payload offset 8. `43 7C 02` has no field for that byte; saving through it left `00` there (the app sent only the live form `43 7C 06` in the captures). A factory reset brought `0x65` back. |
+| Colour flow (live) | `43 7C 06 01 <interval s> 01 <4 × RGB>` | Starts the flow immediately (state mode `3`), the stored flow stays untouched. Confirmed by eye: red → green → blue → yellow at 2 s. The app sends brightness with `43 42 <b>` afterwards; brightness commands work in flow mode and the state reports them. |
+| Mode select | `43 4A <1 white / 2 flow / 3 colour> 01 01` | The lamp switches and pushes a state notification itself. In flow mode the state reports mode `3` with the RGB bytes `02 00 00` (not a colour). When leaving the colour mode, the app saves the current colour into the colour entry right after the switch (`43 4A 02 01 01` → saves `FF 98 00`, `43 4A 01 01 01` → saves `14 14 32`). Saving the stored colour entry: `43 4A 03 01 04 01 RR GG BB 00 <b>`, the stored white entry: `43 4A 01 01 04 02 00 00 00 00 <b> hh ll` (Kelvin BE). The byte at payload offset 8 is writable and read back; the app sends `00`, the factory value is `0x65`. It had no visible effect: with `0x14`, `0x65` and `00` the lamp kept its current brightness (50 %) when switching back to the entry, and the app never reads it (`r3.r.G1` uses only Kelvin, RGB and the flow interval). Most likely a factory placeholder (101 is outside 0–100). `43 4A 02 01 04 01` (the form `d4.c.E` builds for the flow) did not switch the mode. |
+| Name | write `43 51 01 00 <len> <UTF-8>` then `43 51 01 01 <len> <rest>`, read `43 52 00` → two `43 53 01 <part> <len> <data>` | "Probe" = `01 00 05 50 72 6F 62 65` followed by `01 01 00`. The factory name is empty (both chunks length 0). |
+| Colour / white | `43 41 RR GG BB 00 <b>`, `43 43 <K BE> <b>` | As in 5.4. The app's scenes are client-side presets sent as normal commands (e.g. "Movie" = `43 41 14 14 32 00 32`, attributed by timing in the capture). |
+| Beacons | read `43 64 00` → `AE <pairing mode>` then `EF 00`; pairing mode on `43 54 01`, off `43 54 02` | Both answers padded to 18 bytes. No remotes paired. `43 54 01` is acknowledged with `43 82 43 54 01` and the status changes to `AE 01`, `43 54 02` returns it to `AE 00`. Adding a remote was not tested (no remote available). |
+| Records | `43 8C 00` → `43 8D` … `43 91` | Five frames of counters, meaning unknown, not useful for Home Assistant. |
+| Command response | `43 82 <command> <status>` | Status `01` = done (seen for `43 54`, `43 74`), `02` = nothing stored (wake-up read). |
+| Factory reset | `43 74 00` | Acknowledged with `43 82 43 74 01`, then the lamp **drops the connection** and its authorization: the next `43 67 02` needs the button. Afterwards the lamp is on (stored colour `FF00CA`, 100 %), name empty, night-light off 00:00–05:00, delay-off 15 min, no alarms or wake-up, no beacons, stored entries with `0x65`. The clock keeps running. |
+
+**Pairing and deleting the lamp in the app.** The app's pairing frame is `43 67 02`,
+byte-identical to the integration. The lamp answers `43 63 04` when the identifier
+is already authorized. The app's **"Delete device" sends `43 72 02`**
+(DELETEAUTHORIZE with the same identifier `02`) and thereby removes the
+authorization the integration relies on. Afterwards `43 67 02` is answered with
+`43 63 01` (the lamp pulses and waits for its button), `43 63 02` after the button
+was pushed (new authorization, later connects answer `04` again) and `43 63 05`
+after 60 s without a button push. **While it is switched off**, a lamp without our
+authorization answers `43 63 06` instead and does not pulse; switched on at the
+lamp, it answers `01` at once and pulses (controlled on/off runs after `43 72 02`,
+see the hardware test). An authorized lamp answers `04` also when it is off. A
+central that sent `43 72` is not blocked afterwards. The lamp seemed to pulse
+already before the pairing request, from the connection on, so the 60 s window is
+counted from `01`, not from the first pulse.
+
+Since this update the integration waits 60 s for the button, treats `01` and, on
+the Bedside, `06` as "pairing required" and shows a repair issue until the lamp is
+paired; every poll (30 s) starts the next pairing request. Bedside entries store no
+pairing identifier, so the entry needs no change. Deleting an entry sends `43 72`
+with the entry's identifier when the lamp is in reach and still accepts it.
+
+Not established: whether the alarm gradual value is seconds or ignored (it is not
+minutes), whether the wake-up value `1E` really ramps over 30 minutes (the app text
+says so, not observed), any effect of the factory byte `0x65`, adding a real
+remote, and the stored records. OTA was deliberately not exercised (no matching firmware image,
+risk of bricking the lamp).
 
 ## 6. Unknowns and limitations
 

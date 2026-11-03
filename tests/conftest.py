@@ -29,7 +29,6 @@ except ImportError:
 
 from custom_components.yeelight_bt import yeelightbt
 from custom_components.yeelight_bt.yeelightbt import (
-    CMD_GETSERIAL,
     CMD_GETSTATE,
     CMD_GETVER,
     CMD_PAIR,
@@ -37,7 +36,6 @@ from custom_components.yeelight_bt.yeelightbt import (
     MODEL_BEDSIDE,
     MODEL_CANDELA,
     PAIR_SUCCESS,
-    RES_GETSERIAL,
     RES_GETSTATE,
     RES_PAIR,
 )
@@ -170,8 +168,6 @@ class FakeLampClient:
                 )
         elif data[1] == CMD_GETSTATE:
             loop.call_soon(self._handler, None, self.state)
-        elif data[1] == CMD_GETSERIAL:
-            loop.call_soon(self._handler, None, frame(COMMAND_STX, RES_GETSERIAL, 7))
         elif data[1] == CMD_GETVER:
             loop.call_soon(
                 self._handler,

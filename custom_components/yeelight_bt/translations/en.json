@@ -12,14 +12,14 @@
       },
       "bluetooth_confirm": {
         "title": "Yeelight Bluetooth",
-        "description": "A Yeelight {model} was discovered ({address}). Home Assistant connects to the lamp when you submit. If it requests pairing, confirm within 30 seconds: push the small button on a Bedside, or turn the cylinder on a Candela. If Candela pairing times out, setup retries a connection without pairing for basic control.",
+        "description": "A Yeelight {model} was discovered ({address}). Home Assistant connects to the lamp when you submit. If it requests pairing, confirm within 60 seconds: push the small button on a Bedside (switch it on at the lamp first if it does not pulse), or turn the cylinder on a Candela. If Candela pairing times out, setup retries a connection without pairing for basic control.",
         "data": {
           "name": "Lamp name"
         }
       },
       "pick_device": {
         "title": "Yeelight Bluetooth",
-        "description": "Lamps seen by the Home Assistant bluetooth adapters and proxies. Home Assistant connects to the lamp when you submit. If it requests pairing, confirm within 30 seconds: push the small button on a Bedside, or turn the cylinder on a Candela. If Candela pairing times out, setup retries a connection without pairing for basic control.",
+        "description": "Lamps seen by the Home Assistant bluetooth adapters and proxies. Home Assistant connects to the lamp when you submit. If it requests pairing, confirm within 60 seconds: push the small button on a Bedside (switch it on at the lamp first if it does not pulse), or turn the cylinder on a Candela. If Candela pairing times out, setup retries a connection without pairing for basic control.",
         "data": {
           "mac": "Lamp",
           "name": "Lamp name"
@@ -27,7 +27,7 @@
       },
       "manual": {
         "title": "Yeelight Bluetooth",
-        "description": "Enter a name and the MAC address of the lamp. Home Assistant connects to the lamp when you submit. If it requests pairing, confirm within 30 seconds: push the small button on a Bedside, or turn the cylinder on a Candela. If Candela pairing times out, setup retries a connection without pairing for basic control.",
+        "description": "Enter a name and the MAC address of the lamp. Home Assistant connects to the lamp when you submit. If it requests pairing, confirm within 60 seconds: push the small button on a Bedside (switch it on at the lamp first if it does not pulse), or turn the cylinder on a Candela. If Candela pairing times out, setup retries a connection without pairing for basic control.",
         "data": {
           "name": "Lamp name",
           "mac": "MAC address",
@@ -45,7 +45,7 @@
     "error": {
       "invalid_mac": "This is not a valid MAC address (format AA:BB:CC:DD:EE:FF).",
       "not_found": "Home Assistant does not see this lamp. Make sure it is powered and in range of a bluetooth adapter or proxy.",
-      "cannot_connect": "Could not connect to or pair with the lamp. Make sure it is not connected to the Yeelight app. To confirm pairing, push the Bedside's small button or turn the Candela's cylinder."
+      "cannot_connect": "Could not connect to or pair with the lamp. Make sure it is not connected to the Yeelight app. To confirm pairing, push the Bedside's small button (switch it on at the lamp first if it does not pulse) or turn the Candela's cylinder."
     },
     "abort": {
       "already_configured": "This lamp is already configured.",
@@ -68,6 +68,10 @@
     "unknown_model": {
       "title": "Model of {name} not detected",
       "description": "The lamp {address} does not advertise its model, so the Bedside protocol is used. If this is a Candela, open the integration, select **Reconfigure** on {name} and choose the model."
+    },
+    "pairing_required": {
+      "title": "Pair {name} again",
+      "description": "The lamp {address} no longer accepts Home Assistant, for example after it was deleted in the Yeelight app or reset. A Bedside only pulses while it is on, so switch it on at the lamp first. While it pulses, push the small button on a Bedside or turn the cylinder on a Candela within 60 seconds. Home Assistant asks again with every update until the lamp is paired, then this message disappears."
     }
   },
   "exceptions": {

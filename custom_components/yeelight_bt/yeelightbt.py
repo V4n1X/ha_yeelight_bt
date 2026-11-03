@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from datetime import datetime
 import enum
 import logging
 import re
@@ -48,15 +49,17 @@ CMD_GETNAME = 0x52
 RES_GETNAME = 0x53
 CMD_GETVER = 0x5C
 RES_GETVER = 0x5D
-CMD_GETSERIAL = 0x5E
-RES_GETSERIAL = 0x5F
+CMD_SETTIME = 0x60
 RES_GETTIME = 0x62
+CMD_DELETE_AUTH = 0x72
 
 PAIR_REQUESTED = 0x01
 PAIR_SUCCESS = 0x02
 PAIR_NOT_PAIRED = 0x03
 PAIR_ALREADY_PAIRED = 0x04
-PAIR_ERRORS = (0x06, 0x07)
+# A Bedside that does not know the identifier answers this while it is off;
+# switched on, it pulses (PAIR_REQUESTED) instead.
+PAIR_LAMP_OFF = 0x06
 
 MODEL_BEDSIDE = "Bedside"
 MODEL_CANDELA = "Candela"
@@ -68,8 +71,9 @@ TEMP_MAX = 6500
 
 # Time to wait for the pairing answer of a lamp that sends notifications.
 PAIR_RESPONSE_TIMEOUT = 5.0
-# Time given to confirm pairing on the lamp (button or Candela cylinder).
-PAIR_BUTTON_TIMEOUT = 30.0
+# Time given to confirm pairing on the lamp (button or Candela cylinder). A
+# Bedside waits 60 s for its button before it answers 0x05.
+PAIR_BUTTON_TIMEOUT = 60.0
 # A Bedside without notifications gets a short grace period after pairing.
 PAIR_GRACE_PERIOD = 1.0
 # Upper bound for one connect + pair + write cycle, so that a stuck backend
@@ -142,10 +146,13 @@ class Lamp:
         model: str | None = None,
         ble_device_callback: Callable[[], BLEDevice | None] | None = None,
         pairing_id: bytes | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._client: BleakClient | None = None
         self._ble_device = ble_device
         self._ble_device_callback = ble_device_callback
+        # Local time for the Bedside clock, set on every connection; None: not set
+        self._clock = clock
         self._mac = ble_device.address
         self._model = model if model in MODELS else model_from_name(ble_device.name)
         self._pairing_id = pairing_id
@@ -168,7 +175,6 @@ class Lamp:
         )
         self.versions: tuple[int, ...] | None = None
         self.firmware_version: str | None = None
-        self.serial: int | None = None
 
         # store func to call on state received:
         self._state_callbacks: list[Callable[[], None]] = []
@@ -176,6 +182,8 @@ class Lamp:
         self._lock = asyncio.Lock()
         self._pair_resp_event = asyncio.Event()
         self._pair_result: int | None = None
+        # The lamp no longer knows our identifier and waits for its button
+        self._pairing_requested = False
         self._notify_active = False
         # None until a valid state arrives; False for command-only operation.
         self._has_state_feedback: bool | None = (
@@ -280,7 +288,7 @@ class Lamp:
             self.set_ble_device(ble_device)
 
     # ---- connection / pairing (must be called with the lock held) ----
-    async def _ensure_connected(self) -> BleakClient:
+    async def _ensure_connected(self, wait_for_button: bool = True) -> BleakClient:
         if (
             self._client is not None
             and self._client.is_connected
@@ -327,16 +335,30 @@ class Lamp:
             self._set_available(True)
             return client
 
-        await self._pair(client)
+        await self._pair(client, wait_for_button)
         self._set_available(True)
 
+        if self._clock is not None and self._model != MODEL_CANDELA:
+            # Like the app on every connect; the lamp's own timers use this clock.
+            await self._write(client, self._time_command(self._clock()))
         if self._notify_active and self.firmware_version is None:
             await self._write(client, struct.pack("BB16x", COMMAND_STX, CMD_GETVER))
-            if self._model != MODEL_CANDELA:
-                await self._write(
-                    client, struct.pack("BB16x", COMMAND_STX, CMD_GETSERIAL)
-                )
         return client
+
+    @staticmethod
+    def _time_command(now: datetime) -> bytes:
+        """43 60 with BCD second, minute, hour, day, weekday (Sunday 0), month, year."""
+        fields = (
+            now.second,
+            now.minute,
+            now.hour,
+            now.day,
+            now.isoweekday() % 7,
+            now.month,
+            min(99, max(0, now.year - 2000)),
+        )
+        bcd = (int(f"{value:02d}", 16) for value in fields)
+        return bytes((COMMAND_STX, CMD_SETTIME, *bcd)).ljust(18, b"\x00")
 
     async def _start_notify(self, client: BleakClient) -> None:
         previous_feedback = self._has_state_feedback
@@ -355,7 +377,7 @@ class Lamp:
         if self._has_state_feedback != previous_feedback:
             self.run_state_changed_cb()
 
-    async def _pair(self, client: BleakClient) -> None:
+    async def _pair(self, client: BleakClient, wait_for_button: bool = True) -> None:
         """Send the pairing request and wait for its outcome when possible."""
         self._pair_resp_event.clear()
         self._pair_result = None
@@ -384,6 +406,8 @@ class Lamp:
             self._pair_resp_event.clear()
             if (answer := self._pair_answer()) != PAIR_REQUESTED:
                 break
+            if not wait_for_button:
+                raise YeelightPairingError("The lamp asks to be paired again")
             timeout = PAIR_BUTTON_TIMEOUT
 
         if answer == PAIR_SUCCESS or (
@@ -409,6 +433,31 @@ class Lamp:
     async def disconnect(self) -> None:
         async with self._lock:
             await self._disconnect_client()
+
+    async def unpair(self) -> None:
+        """Remove the authorization of our identifier from the lamp (43 72).
+
+        Only a lamp that still accepts the identifier is contacted; one that asks
+        for pairing again is left alone instead of waiting for its button.
+        """
+        if self._pairing_id is None:
+            return
+        async with self._lock:
+            try:
+                client = await self._ensure_connected(wait_for_button=False)
+                await self._write(
+                    client,
+                    struct.pack(
+                        "BB6s10x", COMMAND_STX, CMD_DELETE_AUTH, self._pairing_id
+                    ),
+                )
+                _LOGGER.debug("%s: authorization removed", self._mac)
+            except RETRY_EXCEPTIONS as err:
+                raise YeelightError(
+                    f"Communication with {self._mac} failed: {err!r}"
+                ) from err
+            finally:
+                await self._disconnect_client()
 
     @staticmethod
     async def _write(client: BleakClient, bits: bytes) -> None:
@@ -490,6 +539,11 @@ class Lamp:
     def has_state_feedback(self) -> bool | None:
         """Whether the lamp reports its state (None: not known yet)."""
         return self._has_state_feedback
+
+    @property
+    def pairing_requested(self) -> bool:
+        """Whether the lamp asked for pairing again and waits for confirmation."""
+        return self._pairing_requested
 
     @property
     def confirmed_pairing_id(self) -> bytes | None:
@@ -663,6 +717,10 @@ class Lamp:
                 return
             pair_mode = data[2]
             self._pair_result = pair_mode
+            paired = pair_mode == PAIR_SUCCESS or (
+                pair_mode == PAIR_ALREADY_PAIRED and self._model != MODEL_CANDELA
+            )
+            lamp_off = pair_mode == PAIR_LAMP_OFF and self._model != MODEL_CANDELA
             if pair_mode == PAIR_REQUESTED:
                 _LOGGER.warning(
                     "Yeelight %s pairing request: %s"
@@ -673,9 +731,7 @@ class Lamp:
                     else "push the little button of the lamp now",
                 )
                 self._conn = Conn.PAIRING
-            elif pair_mode == PAIR_SUCCESS or (
-                pair_mode == PAIR_ALREADY_PAIRED and self._model != MODEL_CANDELA
-            ):
+            elif paired:
                 _LOGGER.debug("%s: paired (0x%02x)", self._mac, pair_mode)
                 self._conn = Conn.PAIRED
             elif pair_mode == PAIR_NOT_PAIRED:
@@ -685,8 +741,15 @@ class Lamp:
                     self._mac,
                 )
                 self._conn = Conn.UNPAIRED
+            elif lamp_off:
+                _LOGGER.warning(
+                    "Yeelight %s is not paired and switched off: switch it on at"
+                    " the lamp, then push its little button while it pulses",
+                    self._mac,
+                )
+                self._conn = Conn.UNPAIRED
             else:
-                # 0x06 / 0x07: lamp disconnect imminent
+                # 0x07 (and 0x06 on a Candela): lamp disconnect imminent
                 _LOGGER.error(
                     "The pairing request of %s was rejected (0x%02x)",
                     self._mac,
@@ -694,6 +757,13 @@ class Lamp:
                 )
                 self._conn = Conn.UNPAIRED
             self._pair_resp_event.set()
+            needs_pairing = pair_mode == PAIR_REQUESTED or lamp_off
+            if needs_pairing and not self._pairing_requested:
+                self._pairing_requested = True
+                self.run_state_changed_cb()
+            elif paired and self._pairing_requested:
+                self._pairing_requested = False
+                self.run_state_changed_cb()
 
         elif res_type == RES_GETVER:
             try:
@@ -720,9 +790,3 @@ class Lamp:
             self.firmware_version = version
             _LOGGER.debug("%s: firmware %s", self._mac, version)
             self.run_state_changed_cb()
-
-        elif res_type == RES_GETSERIAL:
-            if len(data) < 3:
-                return
-            self.serial = data[2]
-            _LOGGER.debug("%s: serial %s", self._mac, self.serial)

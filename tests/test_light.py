@@ -46,14 +46,17 @@ from custom_components.yeelight_bt.diagnostics import (
 )
 from custom_components.yeelight_bt.yeelightbt import (
     CMD_BRIGHTNESS,
+    CMD_DELETE_AUTH,
     CMD_GETSTATE,
     CMD_PAIR,
     CMD_POWER,
     CMD_RGB,
+    CMD_SETTIME,
     CMD_TEMP,
     COMMAND_STX,
     MODEL_CANDELA,
     PAIR_REQUESTED,
+    PAIR_SUCCESS,
 )
 
 from .conftest import (
@@ -202,6 +205,28 @@ async def test_bedside(
     assert not client.is_connected
 
 
+async def test_bedside_not_assumed_while_connecting(
+    hass: HomeAssistant, connector, lamp_visible: None
+) -> None:
+    """A new Bedside shows a normal switch before its first state arrives."""
+    connector(FakeLampClient())
+    with patch(
+        "custom_components.yeelight_bt.yeelightbt.Lamp.update", return_value=None
+    ):
+        await _setup(hass, BEDSIDE_ADDRESS, "Bedside")
+        state = hass.states.get("light.lamp")
+    assert state.state == STATE_OFF
+    assert ATTR_ASSUMED_STATE not in state.attributes
+
+
+async def test_bedside_without_notifications_is_assumed(
+    hass: HomeAssistant, connector, lamp_visible: None
+) -> None:
+    connector(FakeLampClient(notify=False))
+    await _setup(hass, BEDSIDE_ADDRESS, "Bedside")
+    assert hass.states.get("light.lamp").attributes[ATTR_ASSUMED_STATE] is True
+
+
 async def test_candela_proxy(
     hass: HomeAssistant, connector, lamp_visible: None
 ) -> None:
@@ -320,7 +345,7 @@ async def test_bedside_reconnect_keeps_confirmed_feedback(
         )
         assert ATTR_ASSUMED_STATE not in hass.states.get("light.lamp").attributes
     assert feedback and all(value is True for value in feedback)
-    assert client.commands() == [CMD_PAIR, CMD_BRIGHTNESS, CMD_BRIGHTNESS]
+    assert client.commands() == [CMD_PAIR, CMD_SETTIME, CMD_BRIGHTNESS, CMD_BRIGHTNESS]
 
 
 async def test_unreachable_at_startup(
@@ -343,12 +368,13 @@ async def test_entity_id_change(
     connector(client)
     entry = await _setup(hass, BEDSIDE_ADDRESS, "Bedside")
     lamp = entry.runtime_data
+    subscriptions = len(lamp._state_callbacks)
 
     entity_registry.async_update_entity("light.lamp", new_entity_id="light.bedroom")
     await hass.async_block_till_done(wait_background_tasks=True)
 
     assert hass.states.get("light.lamp") is None
-    assert len(lamp._state_callbacks) == 1
+    assert len(lamp._state_callbacks) == subscriptions
     await hass.services.async_call(
         LIGHT_DOMAIN, SERVICE_TURN_OFF, {ATTR_ENTITY_ID: "light.bedroom"}, blocking=True
     )
@@ -533,6 +559,73 @@ async def test_remove_entry_deletes_repair_issue(
     assert not issue_registry.async_get_issue(DOMAIN, f"unknown_model_{entry.entry_id}")
     # the lamp shows up as discovered again after deleting it (HA hardware test)
     rediscover.assert_called_once_with(hass, CANDELA_ADDRESS)
+
+
+async def test_pairing_required_issue(
+    hass: HomeAssistant,
+    connector,
+    lamp_visible: None,
+    issue_registry: ir.IssueRegistry,
+) -> None:
+    """A lamp that forgot Home Assistant asks for its button through a repair issue."""
+    client = FakeLampClient(pair_responses=(PAIR_REQUESTED,))
+    connector(client)
+    entry = await _setup(hass, BEDSIDE_ADDRESS, "Bedside")
+    issue_id = f"pairing_required_{entry.entry_id}"
+    assert issue_registry.async_get_issue(DOMAIN, issue_id)
+    assert hass.states.get("light.lamp").state == "unavailable"
+
+    client.pair_responses = (PAIR_REQUESTED, PAIR_SUCCESS)
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=31))
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert not issue_registry.async_get_issue(DOMAIN, issue_id)
+    assert hass.states.get("light.lamp").state == STATE_ON
+
+
+async def test_remove_entry_unpairs_bedside(
+    hass: HomeAssistant, connector, lamp_visible: None
+) -> None:
+    client = FakeLampClient()
+    connector(client)
+    entry = await _setup(hass, BEDSIDE_ADDRESS, "Bedside")
+
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert client.writes[-1] == bytes.fromhex("437202000000000000000000000000000000")
+    assert not client.is_connected
+
+
+async def test_remove_entry_keeps_unknown_authorizations(
+    hass: HomeAssistant, connector, lamp_visible: None
+) -> None:
+    """Command-only Candela, unpaired or unreachable lamps get no delete command."""
+    candela = FakeLampClient(notify=False, model=MODEL_CANDELA)
+    connector(candela)
+    entry = await _setup(hass, CANDELA_ADDRESS, MODEL_CANDELA)
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+    assert CMD_DELETE_AUTH not in candela.commands()
+
+    bedside = FakeLampClient()
+    connector(bedside)
+    entry = await _setup(hass, BEDSIDE_ADDRESS, "Bedside")
+    bedside.pair_responses = (PAIR_REQUESTED,)
+    bedside.disconnected_callback(bedside)
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+    assert CMD_DELETE_AUTH not in bedside.commands()
+
+    entry = await _setup(hass, BEDSIDE_ADDRESS, "Bedside")
+    writes = len(bedside.writes)
+    with patch(
+        "homeassistant.components.bluetooth.async_ble_device_from_address",
+        return_value=None,
+    ):
+        await hass.config_entries.async_remove(entry.entry_id)
+        await hass.async_block_till_done()
+    assert CMD_DELETE_AUTH not in bedside.commands()[writes:]
 
 
 async def test_turn_on_edge_cases(

@@ -34,7 +34,7 @@ async def async_get_config_entry_diagnostics(
             "state_feedback": lamp.has_state_feedback,
             "versions": lamp.versions,
             "firmware_version": lamp.firmware_version,
-            "serial": lamp.serial,
+            "pairing_requested": lamp.pairing_requested,
             "is_on": lamp.is_on,
             "mode": lamp.mode,
             "brightness": lamp.brightness,

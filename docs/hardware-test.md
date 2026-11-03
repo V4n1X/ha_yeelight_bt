@@ -164,6 +164,85 @@ Local captures are kept outside Git as
 `yeelight-updated-driver-20261102-174233.json`. No Bluetooth addresses or
 Home Assistant credentials from these runs were added to this report.
 
+### 2026-11-02/03, Bedside extended legacy features and app capture
+
+One Bedside (`XMCTD_`), connected from a Windows PC (WinRT, bleak 3.0.2, the
+updated `yeelightbt.Lamp` for connect and pairing, raw frames for the rest), the
+Home Assistant connection disabled. The protocol results are in
+[app-ble-protocol.md](app-ble-protocol.md#55-bedside-extended-commands-verified-on-hardware-and-against-the-app-2026-11-0203).
+Every write was read back and restored, except the factory byte of the stored
+flow steps (see "Restore"); the captures stay outside Git.
+
+| Check | Result |
+| --- | --- |
+| Read-only queries (state, version, name, night-light, delay-off, alarms, wake-up, lamp time, colour flow entries 1–3) | All answered except the wake-up read, which returns the command response `43 82 43 89 02` when nothing is set. Slot 0 of the alarms returns nothing. |
+| Lamp time | `43 60` accepted, readback matches the PC clock; the lamp clock was about 14 min off before. The app sets the time on every connect. |
+| Night-light | Set to 22:30–06:45 with BCD and with binary bytes: the lamp echoes the bytes verbatim, so the readback does not show the encoding (the app sends BCD). In the app capture, a power-on inside the active window 21:00–07:00 came up orange at 1 % instead of the previous colour at 100 %. Restored to off, 00:00–05:00. |
+| Delay-off | 20 min set, readback shows the remaining seconds counting down (1198 → 1131 s after 65 s); stop works; the remembered duration was restored to 15 min. |
+| Alarm | Slot 0 is not stored. Slot 1 (probe: daily, once) and slot 2 (app: Mon–Fri) were written and read back unchanged; slots 3–5 were not written. `43 48 <slot>` deletes. Two once-alarms set by the probe (today's day, `act = 03`) fired on time (00:42:02, 00:56:01 by the state polled every second). With gradual `5` the lamp was fully bright within a few seconds (seen by eye); the state reported 100 % at once. |
+| Stored entry byte at offset 8 | Written as `0x14`, `0x65` and `00`: switching back to the colour entry kept the current 50 % every time, no visible effect. |
+| Wake-up | Set, read (`43 8A`), disabled via the enable flag by the app. `43 48 06` and `43 8B 06` each delete it on their own (tested separately). |
+| Colour flow | 4 colours stored and read back; live flow `43 7C 06 …` and mode select `43 4A 02 01 01` switch the lamp into flow mode (state mode 3). Seen by eye: red → green → blue → yellow at 2 s, at the brightness sent with `43 42`. |
+| Beacon pairing mode | `43 54 01` → status `AE 01`, `43 54 02` → `AE 00`. No remote was added. |
+| Factory reset (`43 74 00`) | Acknowledged, then the lamp dropped the connection and needed the button for pairing. Factory state read back (see the protocol notes); the clock kept running. The reset brought the factory flow with `0x65` back. Restored afterwards, including `0x65` of the stored white and colour entries (writable through `43 4A`); rewriting the stored flow with `43 7C 02` during the restore put `00` into the flow steps, which `43 7C` cannot set back. |
+| Name | Written by the app ("Probe"), read back, restored to empty with two empty chunks. |
+| Official app 3.5.4 (Android 16) | Login with a Xiaomi account, adding the Bedside, setting night-light, timer, alarms (once, Mon–Fri), wake-up, flow, white, colour and name while capturing the HCI traffic. The capture matches the frames from the static analysis. |
+| Deleting the lamp in the app | The app sends `43 72 02` and **removes the authorization** the integration uses. Pairing again answered `43 63 01` (pulses), `43 63 02` after the button, `43 63 05` after a 60 s timeout. After the button push the PC connected with the unchanged identifier (`43 63 04` on later connects). Home Assistant was not run; the expected behaviour is in the protocol notes. |
+| Restore | After the runs: lamp off, original colour and brightness, night-light and delay-off as before, name empty, no alarms or wake-up, lamp time correct, stored white and colour entries as before. Left over: the stored flow steps carry `00` instead of the factory `0x65` at payload offset 8 (no visible effect found). |
+
+Resolved from the APK instead of hardware: the Sunday weekday value (0), the
+next-day rule of the mode 1 repeat byte and the action `04` (switch off); the
+repeat byte as today's day and `03` (switch on) fired on hardware. Not tested:
+alarm mode 3 by probe (only through the app), alarm slots 3–5, Home Assistant
+after re-pairing, adding a remote, OTA (deliberately, no firmware image) and
+anything on the Candela. The app was removed from the test phone afterwards and the lamp deleted
+from the app.
+
+### 2026-11-03, clock sync and unpair with the updated driver
+
+Same Bedside from the Windows PC with the updated `yeelightbt.Lamp`, Home Assistant
+disconnected. The suites (86 tests on HA 2026.10.4 and 2026.11.0b1), ruff, mypy
+`--strict` and hassfest passed before this run.
+
+| Check | Result |
+| --- | --- |
+| Clock sync on connect | The lamp read back 02:15:43, Tuesday (weekday 2), one second before the PC's 02:15:44. |
+| `unpair()` | `43 72 02` written; the following connections from the PC were answered `43 63 06` without pulsing, also after a power cycle: the lamp was **off** all the time. |
+| Re-adding through Home Assistant (installed release, through the ESPHome proxy) | No pulsing while the lamp was off; after switching it on at the lamp it pulsed and the button paired it. The entry works again. |
+
+Controlled pairing answers from the PC (Home Assistant entry disabled):
+
+| Lamp | Authorized | Answer to `43 67 02` |
+| --- | --- | --- |
+| off | yes | `04` |
+| on | yes | `04` |
+| on | no (after `43 72 02` from the same PC) | `01`, the lamp pulses; `05` exactly 60 s later without the button |
+| off (switched off at the lamp) | no | `06`, no pulsing |
+| switched on again 30 s later | no | `01` at once |
+
+So `06` means "not authorized and switched off". The PC was accepted again after
+its own `43 72`; nothing is blocked.
+
+Then the updated integration in the maintainer's Home Assistant (HAOS 2026.10.4,
+ESPHome proxy), after a manual backup and an archive of the installed files:
+
+| Check | Result |
+| --- | --- |
+| Repair issue | Entry enabled with the lamp unauthorized and off: `06` on every attempt, `pairing_required` issue shown, log "not paired and switched off". Switched on: `01`, button, `02`; the issue disappeared and the light was available again. |
+| Clock sync | Lamp clock set to 2026-01-01 12:00 from the PC; after Home Assistant connected it read 2026-11-03 03:02:34, Tuesday (Home Assistant's time zone). |
+| Deleting the entry | `04`, then "authorization removed" in the debug log. The delete call took 25.5 s (connection through the proxy). |
+| Re-adding | The lamp (on) pulsed and was paired with the button; the entity came back with its old entity ID. |
+
+In these two runs the button was pushed 25 s and 4 s after Home Assistant's pairing
+request: the lamp already pulsed before that request (apparently from the
+connection on), so the pulsing does not tell when Home Assistant's window starts.
+A third run timed the push from the logged request instead:
+
+| Check | Result |
+| --- | --- |
+| 60 s button window (runtime) | Lamp unpaired from the PC, entry enabled: request logged at 03:17:51, the button pushed at a given time 40 s later, paired at 03:18:36 (45.5 s, beyond the former 30 s). Light available and on, no issue left. |
+| Device page while connecting | With the assumed-state change, the page showed the normal switch while Home Assistant connected (before: two "assumed state" buttons until the first state). |
+
 ## Candela
 
 The maintainer has no Candela. Candela results come from users through the [Candela test report](https://github.com/V4n1X/ha_yeelight_bt/issues/new?template=candela_report.yml) issue template.

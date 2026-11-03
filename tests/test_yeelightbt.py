@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -11,17 +12,20 @@ import pytest
 from custom_components.yeelight_bt import yeelightbt
 from custom_components.yeelight_bt.yeelightbt import (
     CMD_BRIGHTNESS,
+    CMD_DELETE_AUTH,
     CMD_GETSTATE,
     CMD_GETVER,
     CMD_PAIR,
     CMD_POWER,
     CMD_RGB,
+    CMD_SETTIME,
     CMD_TEMP,
     COMMAND_STX,
     MODEL_BEDSIDE,
     MODEL_CANDELA,
     MODEL_UNKNOWN,
     PAIR_ALREADY_PAIRED,
+    PAIR_LAMP_OFF,
     PAIR_NOT_PAIRED,
     PAIR_REQUESTED,
     PAIR_SUCCESS,
@@ -95,6 +99,121 @@ async def test_bedside_connect_pair_and_state(connector) -> None:
     assert client.writes[0] == bytes.fromhex("436702000000000000000000000000000000")
     assert client.writes[-1] == bytes.fromhex("434400000000000000000000000000000000")
     assert calls
+
+
+async def test_bedside_sets_clock_on_connect(connector) -> None:
+    """The lamp clock gets the local time in BCD, Sunday is weekday 0."""
+    client = FakeLampClient()
+    connector(client)
+    # 2026-11-08 is a Sunday
+    lamp = Lamp(
+        ble_device(BEDSIDE_ADDRESS, "XMCTD_1"),
+        clock=lambda: datetime(2026, 11, 8, 23, 5, 9),
+    )
+
+    await lamp.update()
+
+    assert client.commands()[:3] == [CMD_PAIR, CMD_SETTIME, CMD_GETVER]
+    assert client.writes[1] == bytes.fromhex("436009052308001126000000000000000000")
+
+
+async def test_candela_clock_is_not_set(connector) -> None:
+    """The Candela clock command is not verified, so it is never sent."""
+    client = FakeLampClient(model=MODEL_CANDELA)
+    connector(client)
+    lamp = Lamp(
+        ble_device(CANDELA_ADDRESS, "yeelight_ms"),
+        pairing_id=CANDELA_PAIRING_ID,
+        clock=lambda: datetime(2026, 11, 8, 23, 5, 9),
+    )
+
+    await lamp.update()
+
+    assert CMD_SETTIME not in client.commands()
+
+
+@pytest.mark.parametrize("answer", [PAIR_REQUESTED, PAIR_LAMP_OFF])
+async def test_pairing_request_is_reported(connector, answer: int) -> None:
+    """A lamp that forgot our identifier is flagged until it is paired again.
+
+    Switched off, a Bedside answers PAIR_LAMP_OFF instead of pulsing.
+    """
+    asking = FakeLampClient(pair_responses=(answer,))
+    paired = FakeLampClient()
+    connector(asking, paired)
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+    seen = []
+    lamp.add_callback_on_state_changed(lambda: seen.append(lamp.pairing_requested))
+
+    with pytest.raises(YeelightPairingError):
+        await lamp.turn_on()
+    assert lamp.pairing_requested
+
+    await lamp.turn_on()
+    assert not lamp.pairing_requested
+    assert True in seen
+    assert seen[-1] is False
+
+
+async def test_candela_rejection_is_not_a_pairing_request(connector) -> None:
+    """0x06 means "switched off" only on the Bedside."""
+    client = FakeLampClient(model=MODEL_CANDELA, pair_responses=(PAIR_LAMP_OFF,))
+    connector(client)
+    lamp = Lamp(
+        ble_device(CANDELA_ADDRESS, "yeelight_ms"), pairing_id=CANDELA_PAIRING_ID
+    )
+
+    with pytest.raises(YeelightPairingError):
+        await lamp.turn_on()
+
+    assert not lamp.pairing_requested
+
+
+async def test_unpair_removes_authorization(connector) -> None:
+    client = FakeLampClient()
+    connector(client)
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+
+    await lamp.unpair()
+
+    # the frame the Yeelight app sends when the lamp is deleted there
+    assert client.writes[-1] == bytes.fromhex("437202000000000000000000000000000000")
+    assert not client.is_connected
+
+
+async def test_unpair_leaves_lamp_asking_for_pairing(connector) -> None:
+    """No button wait and no delete command for a lamp that is not paired."""
+    client = FakeLampClient(pair_responses=(PAIR_REQUESTED,))
+    connector(client)
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+
+    with pytest.raises(YeelightPairingError):
+        await lamp.unpair()
+
+    assert client.commands() == [CMD_PAIR]
+    assert not client.is_connected
+
+
+async def test_unpair_reports_write_failures(connector) -> None:
+    client = FakeLampClient()
+    connector(client)
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+    await lamp.update()
+    client.fail_writes = 1
+
+    with pytest.raises(YeelightError):
+        await lamp.unpair()
+
+    assert CMD_DELETE_AUTH not in client.commands()
+
+
+async def test_unpair_without_identifier_does_nothing(connector) -> None:
+    fake = connector(FakeLampClient(model=MODEL_CANDELA))
+    lamp = Lamp(ble_device(CANDELA_ADDRESS, "yeelight_ms"))
+
+    await lamp.unpair()
+
+    assert not fake.connections
 
 
 async def test_pairing_waits_for_button(connector) -> None:
@@ -358,8 +477,8 @@ async def test_disconnect_right_after_pairing_is_retried(connector) -> None:
     lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
     original_pair = lamp._pair
 
-    async def pair_then_drop(client):
-        await original_pair(client)
+    async def pair_then_drop(client, *args):
+        await original_pair(client, *args)
         if client is dropped:
             client.is_connected = False
             client.disconnected_callback(client)

@@ -1,5 +1,28 @@
 # Changelog
 
+## v2.2.0
+
+Requires Home Assistant 2026.10 or newer, tested with 2026.10 and 2026.11.
+
+### Bedside
+
+All changes below were tested with a real Bedside in Home Assistant.
+
+- **New: the lamp clock is set** to Home Assistant's local time on every connection, like the Yeelight app does (it was 14 minutes off on the test lamp). The lamp's own night-light and timers use this clock.
+- **New: repair issue when the lamp has to be paired again**, for example after it was deleted in the Yeelight app or reset. It asks you to switch the lamp on and push its button, and disappears once the lamp is paired. A switched-off lamp that is not paired no longer shows up as an unknown rejection (`0x06`) in the log.
+- **New: deleting the lamp in Home Assistant removes its pairing on the lamp**, as deleting it in the Yeelight app does. Adding it again needs the button. The Bedside shares this pairing with the Yeelight app, so it is signed out there as well.
+- The pairing button may now be pushed within 60 seconds instead of 30, the time the lamp itself waits.
+- The serial number is no longer requested: the Bedside never answers it.
+- A newly added or restarted Bedside shows its normal switch while Home Assistant connects, instead of the two "assumed state" buttons. Only a Bedside on a Bluetooth backend without notifications keeps the assumed state.
+
+### Candela (experimental)
+
+- Deleting an authorized Candela removes its Home Assistant authorization on the lamp (frame from the app, not tested on hardware). Command-only entries are not contacted.
+
+### Development
+
+- Protocol notes and hardware test report extended with the lamp clock, night-light, delay-off timer, alarms, wake-up light, color flows, name, beacons, factory reset and pairing behaviour.
+
 ## v2.1.1
 
 - README: the logo, the lamp pictures and the version and license badges now also show in the Marketplace/HACS (absolute links instead of relative ones).

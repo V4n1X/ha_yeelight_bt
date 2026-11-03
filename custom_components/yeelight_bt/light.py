@@ -41,7 +41,8 @@ _LOGGER = logging.getLogger(__name__)
 # slow (re)connection through a proxy never blocks HA's update loop.
 PARALLEL_UPDATES = 0
 UPDATE_INTERVAL = timedelta(seconds=30)
-UPDATE_TIMEOUT = 120
+# Room for a connection through a proxy plus the 60 s pairing button window
+UPDATE_TIMEOUT = 180
 RECONNECT_DELAY = 5
 # Pause between powering on and a follow-up command, the lamp ignores
 # commands while it is still powering on (measured on a Bedside: 0.5 s is
@@ -205,8 +206,14 @@ class YeelightBT(LightEntity, RestoreEntity):
 
     @property
     def assumed_state(self) -> bool:
-        """State is assumed until a valid state notification has been received."""
-        return self._dev.has_state_feedback is not True
+        """State is assumed for lamps that cannot report it.
+
+        The Candela is assumed until it reported a state; a Bedside only when its
+        backend gives no notifications, not while it is still connecting.
+        """
+        if self._dev.model == MODEL_CANDELA:
+            return self._dev.has_state_feedback is not True
+        return self._dev.has_state_feedback is False
 
     @property
     def is_on(self) -> bool:

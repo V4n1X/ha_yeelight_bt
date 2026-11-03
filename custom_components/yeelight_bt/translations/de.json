@@ -12,14 +12,14 @@
       },
       "bluetooth_confirm": {
         "title": "Yeelight Bluetooth",
-        "description": "Eine Yeelight {model} wurde gefunden ({address}). Home Assistant verbindet sich beim Absenden mit der Lampe. Falls sie ein Pairing anfordert, bestätige innerhalb von 30 Sekunden: Drücke bei der Bedside die kleine Taste oder drehe bei der Candela den Zylinder. Bei einem Candela-Pairing-Timeout wird eine Verbindung ohne Pairing für die grundlegende Steuerung geprüft.",
+        "description": "Eine Yeelight {model} wurde gefunden ({address}). Home Assistant verbindet sich beim Absenden mit der Lampe. Falls sie ein Pairing anfordert, bestätige innerhalb von 60 Sekunden: Drücke bei der Bedside die kleine Taste (pulsiert sie nicht, schalte sie zuerst an der Lampe ein) oder drehe bei der Candela den Zylinder. Bei einem Candela-Pairing-Timeout wird eine Verbindung ohne Pairing für die grundlegende Steuerung geprüft.",
         "data": {
           "name": "Name der Lampe"
         }
       },
       "pick_device": {
         "title": "Yeelight Bluetooth",
-        "description": "Lampen, die von den Bluetooth-Adaptern und -Proxys von Home Assistant gesehen werden. Home Assistant verbindet sich beim Absenden mit der Lampe. Falls sie ein Pairing anfordert, bestätige innerhalb von 30 Sekunden: Drücke bei der Bedside die kleine Taste oder drehe bei der Candela den Zylinder. Bei einem Candela-Pairing-Timeout wird eine Verbindung ohne Pairing für die grundlegende Steuerung geprüft.",
+        "description": "Lampen, die von den Bluetooth-Adaptern und -Proxys von Home Assistant gesehen werden. Home Assistant verbindet sich beim Absenden mit der Lampe. Falls sie ein Pairing anfordert, bestätige innerhalb von 60 Sekunden: Drücke bei der Bedside die kleine Taste (pulsiert sie nicht, schalte sie zuerst an der Lampe ein) oder drehe bei der Candela den Zylinder. Bei einem Candela-Pairing-Timeout wird eine Verbindung ohne Pairing für die grundlegende Steuerung geprüft.",
         "data": {
           "mac": "Lampe",
           "name": "Name der Lampe"
@@ -27,7 +27,7 @@
       },
       "manual": {
         "title": "Yeelight Bluetooth",
-        "description": "Gib einen Namen und die MAC-Adresse der Lampe ein. Home Assistant verbindet sich beim Absenden mit der Lampe. Falls sie ein Pairing anfordert, bestätige innerhalb von 30 Sekunden: Drücke bei der Bedside die kleine Taste oder drehe bei der Candela den Zylinder. Bei einem Candela-Pairing-Timeout wird eine Verbindung ohne Pairing für die grundlegende Steuerung geprüft.",
+        "description": "Gib einen Namen und die MAC-Adresse der Lampe ein. Home Assistant verbindet sich beim Absenden mit der Lampe. Falls sie ein Pairing anfordert, bestätige innerhalb von 60 Sekunden: Drücke bei der Bedside die kleine Taste (pulsiert sie nicht, schalte sie zuerst an der Lampe ein) oder drehe bei der Candela den Zylinder. Bei einem Candela-Pairing-Timeout wird eine Verbindung ohne Pairing für die grundlegende Steuerung geprüft.",
         "data": {
           "name": "Name der Lampe",
           "mac": "MAC-Adresse",
@@ -45,7 +45,7 @@
     "error": {
       "invalid_mac": "Keine gültige MAC-Adresse (Format AA:BB:CC:DD:EE:FF).",
       "not_found": "Home Assistant sieht diese Lampe nicht. Sie muss Strom haben und in Reichweite eines Bluetooth-Adapters oder -Proxys sein.",
-      "cannot_connect": "Verbindung oder Pairing mit der Lampe fehlgeschlagen. Sie darf nicht mit der Yeelight-App verbunden sein. Zum Bestätigen des Pairings drücke bei der Bedside die kleine Taste oder drehe bei der Candela den Zylinder."
+      "cannot_connect": "Verbindung oder Pairing mit der Lampe fehlgeschlagen. Sie darf nicht mit der Yeelight-App verbunden sein. Zum Bestätigen des Pairings drücke bei der Bedside die kleine Taste (pulsiert sie nicht, schalte sie zuerst an der Lampe ein) oder drehe bei der Candela den Zylinder."
     },
     "abort": {
       "already_configured": "Diese Lampe ist bereits eingerichtet.",
@@ -68,6 +68,10 @@
     "unknown_model": {
       "title": "Modell von {name} nicht erkannt",
       "description": "Die Lampe {address} meldet ihr Modell nicht, daher wird das Bedside-Protokoll verwendet. Falls es eine Candela ist, öffne die Integration, wähle bei {name} **Neu konfigurieren** und das Modell aus."
+    },
+    "pairing_required": {
+      "title": "{name} neu koppeln",
+      "description": "Die Lampe {address} akzeptiert Home Assistant nicht mehr, zum Beispiel nachdem sie in der Yeelight-App gelöscht oder zurückgesetzt wurde. Eine Bedside pulsiert nur, wenn sie eingeschaltet ist, schalte sie also zuerst an der Lampe ein. Während sie pulsiert, drücke bei der Bedside innerhalb von 60 Sekunden die kleine Taste oder drehe bei der Candela den Zylinder. Home Assistant fragt bei jeder Aktualisierung erneut, bis die Lampe gekoppelt ist; danach verschwindet diese Meldung."
     }
   },
   "exceptions": {
