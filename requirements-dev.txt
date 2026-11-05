@@ -1,7 +1,9 @@
-# requirements for development and tests
-# HA >= 2026.11 ships its own test package (pytest-home-assistant), switch to
-# it once it is published; the tests work with both.
-pytest-homeassistant-custom-component
+# requirements for development and tests. The tests run on Home Assistant
+# 2026.11 with its test package, which is not on PyPI yet; install both as
+# .github/workflows/tests.yml does, the test package from a checkout of the
+# core repository at the release tag:
+#   pip install "homeassistant==2026.11.0" \
+#     "<core checkout>/packages/pytest-homeassistant[bluetooth]"
 # requirements of the HA bluetooth/usb integrations used in the tests
 aiousbwatcher
 pyudev

@@ -31,6 +31,8 @@ Note the setup: Home Assistant version, integration version, local adapter or pr
 - [ ] Changing a time keeps the switch state and the other time.
 - [ ] A window that crosses midnight (21:00–07:00) is active in the morning.
 - [ ] Turning the lamp on inside the window: orange at 1 %, also from the lamp's own button.
+- [ ] After that, night light switched off while the lamp is off (or the window over): turning it on, from Home Assistant and from the lamp's button, shows the colour and brightness from before the night light in Home Assistant, as on the lamp. A colour temperature change right after keeps the brightness.
+- [ ] The same after restarting Home Assistant between the night-light power-on and the next one.
 - [ ] Changing the window in the Yeelight app shows up in Home Assistant after the next connect.
 - [ ] Through a backend without notifications: the three entities stay `unavailable`, the light keeps working.
 
@@ -252,6 +254,45 @@ A third run timed the push from the logged request instead:
 | --- | --- |
 | 60 s button window (runtime) | Lamp unpaired from the PC, entry enabled: request logged at 03:17:51, the button pushed at a given time 40 s later, paired at 03:18:36 (45.5 s, beyond the former 30 s). Light available and on, no issue left. |
 | Device page while connecting | With the assumed-state change, the page showed the normal switch while Home Assistant connected (before: two "assumed state" buttons until the first state). |
+
+### 2026-11-05, state after the night light (v2.3.0 in Home Assistant)
+
+Reported by the maintainer: with the night light switched off while the lamp was
+off, the lamp came up green at 100 % again, but Home Assistant kept showing the
+night light's orange at 1 %. Same lamp and Home Assistant (HAOS, 2026.11.0, ESPHome
+proxy), window 22:00–09:00 active, debug log of the integration; every step was
+sent through Home Assistant and its visible result confirmed at the lamp.
+
+| Check | Result |
+| --- | --- |
+| The reported case (lamp switched at its button) | The lamp showed green, bright, and answered a fresh state query with `43 45 01 01 FF 98 00 00 01`: Home Assistant showed what the lamp reported. |
+| Power cycle through Home Assistant, night light off | Green, bright; still reported orange at 1 %. |
+| Brightness 100 % only | No visible change; reported orange at 100 %. |
+| White 4000 K / 60 %, off, night light on, on | Orange at 1 %, reported the same. |
+| Off, night light off, on | White 4000 K / 60 %; reported white 4000 K at **1 %**. |
+| 2700 K only (brightness kept) | Warm white, **dimmed to 1 %**. |
+| Power cycle | White 4000 K / 60 % again, reported 2700 K at 1 %: the 2700 K was not stored. |
+| 4000 K / 60 % sent as it was shown | No visible change, reported correctly. |
+| Inside the night light: brightness 30 %, then (second run) green 100 %; off, night light off, on | Both times the state from before the night light (white at 93 % set at the lamp's slider, then white at 51 %); reported the brightness from the night light. |
+| Brightness 51 % only after the night light, power cycle | White at 51 %: stored. |
+| Connection | The proxy dropped the link once (01:30), Home Assistant found no connectable adapter for 50 s; commands to the unavailable light were skipped, then it reconnected on its own. Unrelated to the night light. |
+
+The protocol notes describe the resulting behaviour
+([app-ble-protocol.md](app-ble-protocol.md#55-bedside-extended-commands-verified-on-hardware-and-against-the-app-2026-11-0203)).
+v2.3.1 keeps the state from before the night light, shows it and writes it back.
+
+Then v2.3.1 on the same lamp and Home Assistant (installed files archived first,
+debug log; each visible result confirmed at the lamp):
+
+| Check | Result |
+| --- | --- |
+| White 4000 K / 60 %, off, night light on, on | Orange at 1 % in Home Assistant and on the lamp; the state before was kept. |
+| Off, night light off, on | The lamp reported 1 %, Home Assistant showed white 60 % at once and wrote it back 1.5 s later (no visible change); later polls reported 60 %. |
+| 2700 K only | Warm white, the brightness stayed (before the fix: 1 %). |
+| The reported case at the lamp's button (night light on, on, off, night light off in Home Assistant, on) | Warm white at 100 % (set at the slider before) on the lamp and in Home Assistant, written back, reported correctly afterwards. |
+| Green 100 %, night light round, then `light.turn_on` with brightness 50 % only | The lamp reported orange at 1 % when it came up; Home Assistant sent green at 51 % in one command: green at half brightness. |
+| Night light round, Home Assistant restarted (90 s), night light off, on | The kept state (green 51 %) survived the restart, was shown and written back; the lamp stayed green at half brightness. |
+| Log | No warnings or errors of the integration. |
 
 ## Candela
 

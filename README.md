@@ -93,6 +93,11 @@ colour: a plain `light.turn_on` inside the window comes up orange at 1 %. A
 `light.turn_on` with brightness or colour overrides that, the lamp then uses
 the values it was given.
 
+The lamp does not store what is set while the night light is on: switched on
+again outside the window (or with the night light off), it comes back with its
+state from before. It still reports the night light's orange at 1 % then, so
+Home Assistant keeps that state itself, shows it, and writes it back once.
+
 Home Assistant reads the window from the lamp whenever it connects. The entities need a Bluetooth backend that
 supports notifications. Without one they stay `unavailable`: every write sends
 the complete window, so unknown times would be overwritten.

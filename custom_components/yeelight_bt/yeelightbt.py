@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, time as dt_time
 import enum
 import logging
@@ -89,6 +89,12 @@ CANDELA_NAME = re.compile(r"^yeelight_ms(?:$|[_ -])", re.IGNORECASE)
 RETRY_DELAY = 0.5
 # Wait for the 43 71 answer to a night-light query (43 70) before using the value
 NIGHT_LIGHT_READ_TIMEOUT = 2.0
+# A Bedside switched on inside its night-light window comes up in color mode
+# with this color, at the window's brightness (always 1 % from the app).
+NIGHT_LIGHT_COLOR = (0xFF, 0x98, 0x00)
+NIGHT_LIGHT_BRIGHTNESS = 0x01
+# Wait for the state a Bedside pushes after a power-on command
+POWER_ON_REPORT_TIMEOUT = 2.0
 # Each attempt may take up to 20 s (bleak-retry-connector), so an unreachable
 # lamp fails within about a minute.
 CONNECT_ATTEMPTS = 3
@@ -133,6 +139,42 @@ class NightLight:
     enabled: bool
     start: dt_time
     end: dt_time
+
+
+@dataclass(frozen=True)
+class LightState:
+    """Mode, color, temperature and brightness of a Bedside, as in 43 45.
+
+    The lamp reports no temperature in color mode and no color in white mode.
+    """
+
+    mode: int
+    color: tuple[int, int, int]
+    temperature: int
+    brightness: int
+
+    def as_dict(self) -> dict[str, Any]:
+        """The state as JSON data."""
+        return {
+            "mode": self.mode,
+            "color": list(self.color),
+            "temperature": self.temperature,
+            "brightness": self.brightness,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> LightState | None:
+        """Read stored data, None when it is missing or malformed."""
+        try:
+            red, green, blue = (int(value) for value in data["color"])
+            return cls(
+                mode=int(data["mode"]),
+                color=(red, green, blue),
+                temperature=int(data["temperature"]),
+                brightness=int(data["brightness"]),
+            )
+        except KeyError, TypeError, ValueError:
+            return None
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -210,6 +252,22 @@ class Lamp:
         self.firmware_version: str | None = None
         # The night-light window, None until the lamp reported it (43 71)
         self._night_light: NightLight | None = None
+        # Bedside after a power-on inside the night-light window: the state it
+        # shows again at its next normal power-on. It stores neither the night
+        # light nor changes made during it, but afterwards it keeps reporting
+        # the night-light color and brightness, and uses them for commands that
+        # keep the brightness, until a command sets them again. None: no night
+        # light since, or the state before it is not known.
+        self._power_on_state: LightState | None = None
+        # The lamp came up with _power_on_state but still reports the night light
+        self._resync_pending = False
+        # Its report at that power-on, to tell later changes on the lamp apart
+        self._stale_report: LightState | None = None
+        # Power of the last state report; None after connecting and while our
+        # own power-on is on its way, so that only a change counts as power-on
+        self._reported_on: bool | None = None
+        self._power_on_expected = False
+        self._power_on_report = asyncio.Event()
 
         # store func to call on state received:
         self._state_callbacks: list[Callable[[], None]] = []
@@ -305,6 +363,7 @@ class Lamp:
         self._client = None
         self._conn = Conn.DISCONNECTED
         self._notify_active = False
+        self._reported_on = None
         # Answers of queries sent on this link can no longer arrive
         self._forget_night_light_queries()
         # The lamp stays available: the next command or poll reconnects and
@@ -439,7 +498,7 @@ class Lamp:
                 COMMAND_STX,
                 CMD_SETNIGHTLIGHT,
                 0x01 if night_light.enabled else 0x00,
-                0x01,
+                NIGHT_LIGHT_BRIGHTNESS,
                 _to_bcd(night_light.start.hour),
                 _to_bcd(night_light.start.minute),
                 _to_bcd(night_light.end.hour),
@@ -515,6 +574,7 @@ class Lamp:
         self._client = None
         self._conn = Conn.DISCONNECTED
         self._notify_active = False
+        self._reported_on = None
         # Answers of queries sent on the old link can no longer arrive
         self._forget_night_light_queries()
         if client is None:
@@ -676,11 +736,31 @@ class Lamp:
         """The night-light window, None until the lamp reported it (43 71)."""
         return self._night_light
 
+    @property
+    def power_on_state(self) -> LightState | None:
+        """The state a Bedside shows again after the night light, if known."""
+        return self._power_on_state
+
+    @property
+    def resync_pending(self) -> bool:
+        """Whether the lamp came up from the night light and reports its leftovers."""
+        return self._resync_pending
+
     def restore_state(self, is_on: bool, brightness: int | None) -> None:
         """Restore the last known state for lamps without state feedback."""
         self._is_on = is_on
         if brightness is not None:
             self._brightness = min(100, max(0, brightness))
+
+    def restore_power_on_state(self, state: LightState | None) -> None:
+        """Take the state kept over a restart, unless a newer one is known."""
+        if (
+            self._model != MODEL_CANDELA
+            and self._power_on_state is None
+            and state is not None
+            and self._restorable(state)
+        ):
+            self._power_on_state = state
 
     # ---- commands ----
     def _power_brightness_command(self, command: int, value: int) -> bytes:
@@ -710,10 +790,36 @@ class Lamp:
         """Turn the lamp on. (send back state through notif)"""
         bits = self._power_brightness_command(CMD_POWER, CMD_POWER_ON)
         _LOGGER.debug("Send Cmd: Turn On")
-        await self.send_cmd(bits)
+        # Its report tells whether the lamp came up with the night light; one
+        # that was due before belongs to the old power state.
+        self._reported_on = None
+        self._power_on_expected = True
+        self._power_on_report.clear()
+        try:
+            await self.send_cmd(bits)
+        except BaseException:
+            self._power_on_expected = False
+            raise
         self._is_on = True
         if self._model == MODEL_CANDELA and self._brightness <= 0:
             self._brightness = 100
+
+    async def async_wait_power_on(self) -> None:
+        """Wait (best effort) for the report of the last power-on command.
+
+        It decides how the next command is sent after the night light. A report
+        arriving later no longer counts as that power-on: it would describe the
+        lamp before the commands that follow now.
+        """
+        if (
+            self._power_on_expected
+            and self._notify_active
+            and self._model != MODEL_CANDELA
+        ):
+            with suppress(TimeoutError):
+                async with asyncio.timeout(POWER_ON_REPORT_TIMEOUT):
+                    await self._power_on_report.wait()
+        self._power_on_expected = False
 
     async def turn_off(self) -> None:
         """Turn the lamp off. (send back state through notif)"""
@@ -721,6 +827,8 @@ class Lamp:
         _LOGGER.debug("Send Cmd: Turn Off")
         await self.send_cmd(bits)
         self._is_on = False
+        # The lamp keeps the leftovers, its next normal power-on writes back
+        self._resync_pending = False
 
     async def set_night_light(
         self,
@@ -786,6 +894,10 @@ class Lamp:
     async def set_brightness(self, brightness: int) -> None:
         """Set the brightness [1-100] (no notif)"""
         brightness = min(100, max(1, int(brightness)))
+        if self._resync_pending and (state := self._power_on_state) is not None:
+            # The lamp still holds the night-light color: send the shown one
+            await self._write_state(replace(state, brightness=brightness))
+            return
         _LOGGER.debug("Send Cmd: Brightness %s", brightness)
         bits = self._power_brightness_command(CMD_BRIGHTNESS, brightness)
         await self.send_cmd(bits)
@@ -793,34 +905,204 @@ class Lamp:
 
     async def set_temperature(self, kelvin: int, brightness: int | None = None) -> None:
         """Set the temperature (White mode) [1700 - 6500 K] (no notif)"""
-        if brightness is not None:
-            brightness = min(100, max(1, int(brightness)))
+        brightness = self._command_brightness(brightness)
         kelvin = min(TEMP_MAX, max(TEMP_MIN, int(kelvin)))
         _LOGGER.debug("Send Cmd: Temperature %s, %s", kelvin, brightness)
-        # Zero preserves brightness, as in the app's colour/CT-only calls.
-        bits = struct.pack(">BBHB13x", COMMAND_STX, CMD_TEMP, kelvin, brightness or 0)
-        await self.send_cmd(bits)
+        await self.send_cmd(self._temperature_command(kelvin, brightness or 0))
         self._temperature = kelvin
         if brightness is not None:
             self._brightness = brightness
+            self._command_set_all_fields()
         self._mode = self.MODE_WHITE
 
     async def set_color(
         self, red: int, green: int, blue: int, brightness: int | None = None
     ) -> None:
         """Set the color of the lamp [0-255] (no notif)"""
-        if brightness is not None:
-            brightness = min(100, max(1, int(brightness)))
+        brightness = self._command_brightness(brightness)
         red, green, blue = (min(255, max(0, int(c))) for c in (red, green, blue))
         _LOGGER.debug("Send Cmd: Color %s, %s", (red, green, blue), brightness)
-        bits = struct.pack(
-            "BBBBBBB11x", COMMAND_STX, CMD_RGB, red, green, blue, 0x00, brightness or 0
-        )
-        await self.send_cmd(bits)
+        await self.send_cmd(self._color_command(red, green, blue, brightness or 0))
         self._rgb = (red, green, blue)
         if brightness is not None:
             self._brightness = brightness
+            self._command_set_all_fields()
         self._mode = self.MODE_COLOR
+
+    def _command_brightness(self, brightness: int | None) -> int | None:
+        """The brightness for a color or temperature command, None: keep it."""
+        if brightness is not None:
+            return min(100, max(1, int(brightness)))
+        if self._resync_pending and self._power_on_state is not None:
+            # Keeping it would apply the night light's brightness
+            return self._power_on_state.brightness
+        return None
+
+    def _command_set_all_fields(self) -> None:
+        """A command set color or temperature and brightness.
+
+        Inside the night light the lamp stores nothing, the kept state stays.
+        After it, the lamp now reports and stores what it shows.
+        """
+        if self._resync_pending:
+            self._forget_power_on_state()
+
+    @staticmethod
+    def _temperature_command(kelvin: int, brightness: int) -> bytes:
+        # Zero preserves brightness, as in the app's colour/CT-only calls.
+        return struct.pack(">BBHB13x", COMMAND_STX, CMD_TEMP, kelvin, brightness)
+
+    @staticmethod
+    def _color_command(red: int, green: int, blue: int, brightness: int) -> bytes:
+        return struct.pack(
+            "BBBBBBB11x", COMMAND_STX, CMD_RGB, red, green, blue, 0x00, brightness
+        )
+
+    def _state_command(self, state: LightState) -> bytes:
+        """Set all fields of a state; a flow only gets its brightness and keeps on."""
+        if state.mode == self.MODE_WHITE:
+            return self._temperature_command(state.temperature, state.brightness)
+        if state.mode == self.MODE_COLOR:
+            return self._color_command(*state.color, state.brightness)
+        return self._power_brightness_command(CMD_BRIGHTNESS, state.brightness)
+
+    async def _write_state(self, state: LightState) -> None:
+        """Send all fields of a state to a lamp that came up from the night light."""
+        _LOGGER.debug("Send Cmd: State %s", state)
+        await self.send_cmd(self._state_command(state))
+        self._show(state)
+        self._forget_power_on_state()
+
+    async def async_resync(self) -> None:
+        """Write the shown state back to a lamp that came up from the night light.
+
+        The lamp shows that state already, the write only replaces the
+        night-light values it still reports. Skipped when a command or a
+        power-off came first.
+        """
+        async with self._lock:
+            state = self._power_on_state
+            if not self._resync_pending or not self._is_on or state is None:
+                return
+            _LOGGER.debug("Send Cmd: Restore %s", state)
+            await self._send_cmd(self._state_command(state))
+            self._forget_power_on_state()
+        self.run_state_changed_cb()
+
+    # ---- state after the night light (Bedside) ----
+    def _forget_power_on_state(self) -> None:
+        self._power_on_state = None
+        self._resync_pending = False
+        self._stale_report = None
+
+    def _show(self, state: LightState) -> None:
+        self._mode = state.mode
+        self._rgb = state.color
+        self._temperature = state.temperature
+        self._brightness = state.brightness
+
+    @classmethod
+    def _restorable(cls, state: LightState) -> bool:
+        """Whether a state can be written back to the lamp as it is.
+
+        The night light's own color and brightness are refused: after the
+        night light, they are what the lamp reports, not what it shows.
+        """
+        if not NIGHT_LIGHT_BRIGHTNESS < state.brightness <= 100:
+            return False
+        if state.mode == cls.MODE_WHITE:
+            return TEMP_MIN <= state.temperature <= TEMP_MAX
+        if state.mode == cls.MODE_COLOR:
+            return state.color not in ((0, 0, 0), NIGHT_LIGHT_COLOR)
+        return state.mode == cls.MODE_FLOW
+
+    def _night_light_power_on(self, reported: LightState) -> bool:
+        """Whether the lamp came up with its night light.
+
+        The report alone cannot tell: a lamp in color mode keeps reporting the
+        night-light color after a normal power-on as well. The window decides,
+        the lamp clock is set to Home Assistant's time on every connection.
+        When in doubt it is the night light, a write-back would override it.
+        """
+        if reported.mode != self.MODE_COLOR or reported.color != NIGHT_LIGHT_COLOR:
+            return False
+        night_light = self._night_light
+        if night_light is None or self._clock is None:
+            return True
+        if not night_light.enabled:
+            return False
+        now = self._clock().time()
+        if night_light.start < night_light.end:
+            return night_light.start <= now < night_light.end
+        # Crossing midnight; equal times count as the whole day
+        return now >= night_light.start or now < night_light.end
+
+    def _handle_bedside_state(self, is_on: bool, reported: LightState) -> None:
+        """Show a state report, or the state it hides after the night light."""
+        powered_on = is_on and (self._power_on_expected or self._reported_on is False)
+        self._reported_on = is_on
+        if is_on:
+            self._power_on_expected = False
+            self._power_on_report.set()
+        if powered_on:
+            self._resync_pending = False
+            if self._night_light_power_on(reported):
+                self._keep_power_on_state()
+            elif (state := self._power_on_state) is not None:
+                _LOGGER.debug(
+                    "%s: back from the night light, shows %s, reports %s",
+                    self._mac,
+                    state,
+                    reported,
+                )
+                self._resync_pending = True
+                self._stale_report = reported
+                self._show(state)
+                return
+        elif self._resync_pending:
+            if not is_on:
+                # Off before the write-back: the next power-on tries again
+                self._resync_pending = False
+                return
+            if self._take_change_on_lamp(reported):
+                return
+            _LOGGER.debug("%s: changed on the lamp, state %s", self._mac, reported)
+            self._forget_power_on_state()
+        self._show(reported)
+
+    def _keep_power_on_state(self) -> None:
+        """Keep the state from before the night light, the lamp shows it later."""
+        if self._power_on_state is not None:
+            # From an earlier night-light power-on, the lamp stored nothing since
+            return
+        state = LightState(
+            self._mode or 0, self._rgb, self._temperature, self._brightness
+        )
+        if self._restorable(state):
+            self._power_on_state = state
+            _LOGGER.debug("%s: night light, keeping %s", self._mac, state)
+        else:
+            _LOGGER.debug("%s: night light, state before it unknown", self._mac)
+
+    def _take_change_on_lamp(self, reported: LightState) -> bool:
+        """Take a change made on the lamp before the write-back, if it can be.
+
+        Its slider only changes the brightness of the report; any other change
+        means the lamp no longer shows the kept state.
+        """
+        stale, state = self._stale_report, self._power_on_state
+        if (
+            stale is None
+            or state is None
+            or replace(reported, brightness=stale.brightness) != stale
+        ):
+            return False
+        if reported.brightness != stale.brightness:
+            state = replace(state, brightness=reported.brightness)
+            self._power_on_state = state
+            self._stale_report = reported
+        self._show(state)
+        return True
 
     # ---- notifications ----
     def _notification_handler(self, _sender: Any, data: bytearray) -> None:
@@ -861,10 +1143,15 @@ class Lamp:
             else:
                 if len(data) < 11:
                     return
-                self._mode = data[3]
-                self._rgb = (data[4], data[5], data[6])
-                self._brightness = data[8]
-                self._temperature = int.from_bytes(data[9:11], "big")
+                self._handle_bedside_state(
+                    data[2] == CMD_POWER_ON,
+                    LightState(
+                        mode=data[3],
+                        color=(data[4], data[5], data[6]),
+                        temperature=int.from_bytes(data[9:11], "big"),
+                        brightness=data[8],
+                    ),
+                )
             self._is_on = data[2] == CMD_POWER_ON
             self._has_state_feedback = True
             _LOGGER.debug("%s", self)

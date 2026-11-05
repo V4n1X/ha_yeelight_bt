@@ -23,7 +23,11 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
-from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.helpers.restore_state import (
+    ExtraStoredData,
+    RestoredExtraData,
+    RestoreEntity,
+)
 from homeassistant.util.color import (
     brightness_to_value,
     color_hs_to_RGB,
@@ -33,7 +37,14 @@ from homeassistant.util.color import (
 
 from . import YeelightBTConfigEntry
 from .const import DOMAIN
-from .yeelightbt import MODEL_CANDELA, TEMP_MAX, TEMP_MIN, Lamp, YeelightError
+from .yeelightbt import (
+    MODEL_CANDELA,
+    TEMP_MAX,
+    TEMP_MIN,
+    Lamp,
+    LightState,
+    YeelightError,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -93,6 +104,7 @@ class YeelightBT(LightEntity, RestoreEntity):
             self._attr_translation_key = "bedside"
             self._attr_supported_color_modes = {ColorMode.COLOR_TEMP, ColorMode.HS}
         self._update_task: asyncio.Task[None] | None = None
+        self._resync_task: asyncio.Task[None] | None = None
         self._unsub_reconnect: CALLBACK_TYPE | None = None
         self._sw_version: str | None = None
 
@@ -107,16 +119,30 @@ class YeelightBT(LightEntity, RestoreEntity):
         )
         self.async_on_remove(self._cancel_tasks)
 
-        if self._dev.model == MODEL_CANDELA and (
-            last_state := await self.async_get_last_state()
-        ):
-            # The Candela rarely reports its state, start from the last known one
-            brightness = last_state.attributes.get(ATTR_BRIGHTNESS)
-            self._dev.restore_state(
-                last_state.state == STATE_ON,
-                self._to_lamp_brightness(brightness) if brightness else None,
+        if self._dev.model == MODEL_CANDELA:
+            if last_state := await self.async_get_last_state():
+                # The Candela rarely reports its state, start from the last one
+                brightness = last_state.attributes.get(ATTR_BRIGHTNESS)
+                self._dev.restore_state(
+                    last_state.state == STATE_ON,
+                    self._to_lamp_brightness(brightness) if brightness else None,
+                )
+        elif extra := await self.async_get_last_extra_data():
+            # The Bedside shows it again after the night light
+            self._dev.restore_power_on_state(
+                LightState.from_dict(extra.as_dict().get("power_on_state"))
             )
         self._schedule_update()
+
+    @property
+    def extra_restore_state_data(self) -> ExtraStoredData | None:
+        """The state the Bedside shows again after the night light."""
+        if self._dev.model == MODEL_CANDELA:
+            return None
+        state = self._dev.power_on_state
+        return RestoredExtraData(
+            {"power_on_state": None if state is None else state.as_dict()}
+        )
 
     @callback
     def async_entity_id_changed(self, old_entity_id: str) -> None:
@@ -129,9 +155,10 @@ class YeelightBT(LightEntity, RestoreEntity):
         if self._unsub_reconnect is not None:
             self._unsub_reconnect()
             self._unsub_reconnect = None
-        if self._update_task is not None:
-            self._update_task.cancel()
-            self._update_task = None
+        for task in (self._update_task, self._resync_task):
+            if task is not None:
+                task.cancel()
+        self._update_task = self._resync_task = None
 
     @callback
     def _async_interval_update(self, _now: datetime) -> None:
@@ -179,8 +206,23 @@ class YeelightBT(LightEntity, RestoreEntity):
             self._unsub_reconnect = async_call_later(
                 self.hass, RECONNECT_DELAY, self._schedule_update
             )
+        if self._dev.resync_pending and (
+            self._resync_task is None or self._resync_task.done()
+        ):
+            self._resync_task = self.hass.async_create_background_task(
+                self._async_resync(), f"{DOMAIN} restore {self._dev.mac}"
+            )
         self._update_sw_version()
         self.async_write_ha_state()
+
+    async def _async_resync(self) -> None:
+        """Write the shown state back to a lamp that came up from the night light."""
+        # The lamp ignores commands while it is still powering on
+        await asyncio.sleep(POWER_ON_DELAY)
+        try:
+            await self._dev.async_resync()
+        except YeelightError as err:
+            _LOGGER.debug("Restoring the state of %s failed: %s", self._dev.mac, err)
 
     @callback
     def _update_sw_version(self) -> None:
@@ -298,6 +340,8 @@ class YeelightBT(LightEntity, RestoreEntity):
                 # the Candela takes the next command right away (Homey app,
                 # candelapy), the Bedside ignores it for about 1 s
                 await asyncio.sleep(POWER_ON_DELAY)
+                # its report tells whether it came up from the night light
+                await self._dev.async_wait_power_on()
 
         modes = self._attr_supported_color_modes or set()
         if ATTR_HS_COLOR in kwargs and ColorMode.HS in modes:

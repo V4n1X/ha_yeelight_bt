@@ -1,5 +1,40 @@
 # Changelog
 
+## v2.3.1
+
+Requires Home Assistant 2026.10 or newer, tested with 2026.10 and 2026.11.
+
+### Bedside
+
+- **Fixed: wrong state after the night light.** Switched on again after the
+  night light (with the night light switched off, or after the window), the
+  lamp comes back with its colour and brightness from before, but keeps
+  reporting the night light's orange at 1 %. Home Assistant showed that. It now
+  keeps the state from before the night light, shows it when the lamp comes
+  back, also when it was switched at the lamp, and writes it back once 1.5 s
+  later (no visible change), so that the lamp reports it again.
+- Changing only the colour or colour temperature after the night light no
+  longer dims the lamp to 1 %: the lamp used the night light's brightness for
+  commands that keep the brightness. Home Assistant now sends the brightness
+  it shows.
+- The kept state survives a restart of Home Assistant. Changes made while the
+  night light is on are not stored by the lamp, so Home Assistant does not keep
+  them either.
+- Diagnostics show the kept state.
+- Tested with a real Bedside in Home Assistant 2026.11: turned on from Home
+  Assistant and at the lamp's button, in white and colour mode, with a
+  brightness-only turn-on and across a restart. The write-back is not visible.
+
+### Development
+
+- Protocol notes and hardware test report: what the Bedside stores and reports
+  around a night-light power-on.
+- Tests for the state after the night light. The fake lamp pushes its state
+  after switching and reports what commands set, like the Bedside.
+- The CI runs the tests on Home Assistant 2026.11 with its own test package,
+  taken from the core repository: `pytest-homeassistant-custom-component` has
+  no 2026.11 release. The test job stops after 15 minutes.
+
 ## v2.3.0
 
 Requires Home Assistant 2026.10 or newer, tested with 2026.10 and 2026.11.

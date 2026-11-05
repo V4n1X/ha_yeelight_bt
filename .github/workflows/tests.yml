@@ -18,12 +18,27 @@ jobs:
 
   pytest:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # The tested Home Assistant version. Its test package is not published
+      # on PyPI, so it is installed from the core repository at this tag.
+      HA_VERSION: "2026.11.0"
     steps:
       - uses: actions/checkout@v5
+      - name: Check out the Home Assistant test package
+        uses: actions/checkout@v5
+        with:
+          repository: home-assistant/core
+          ref: ${{ env.HA_VERSION }}
+          path: ha-core
+          sparse-checkout: packages/pytest-homeassistant
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
       - name: Install requirements
-        run: pip install -r requirements-dev.txt
+        run: >-
+          pip install "homeassistant==$HA_VERSION"
+          "./ha-core/packages/pytest-homeassistant[bluetooth]"
+          -r requirements-dev.txt
       - name: Run tests
         run: python -m pytest

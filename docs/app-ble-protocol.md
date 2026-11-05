@@ -609,6 +609,48 @@ a write always contains all fields, the entities are unavailable on backends
 without notifications, where the readback never arrives; the light entity is
 unaffected. The Candela gets no night-light entities.
 
+**Power-on after the night light** (hardware test 2026-11-05, through Home
+Assistant, window 22:00–09:00 active, every visual result confirmed by eye). A
+power-on inside the window puts the night light into the lamp's *current*
+state (colour mode, `FF 98 00`, the window's brightness) without storing it.
+The next normal power-on (night light switched off, or outside the window)
+brings the *stored* state back to the LEDs, but copies only its mode into the
+current state: colour, temperature and brightness keep the night-light values,
+or whatever was set while the night light was on. State notifications and polls
+report this current state, and commands that keep the brightness use it.
+
+| Step | Shown by the lamp | Reported (`43 45`) |
+| --- | --- | --- |
+| Off with night light at white 4000 K / 60 %, power-on in the window | orange, 1 % | `01 01 FF 98 00 00 01 00 00` |
+| Off, night light switched off, power-on | white 4000 K / 60 % | `01 02 00 00 00 00 01 0F A0`, 1 % |
+| Same with green 100 % before | green 100 % | `01 01 FF 98 00 00 01 00 00`, the night light's report |
+| Power cycle without night light | unchanged | unchanged |
+| `43 42 64` (brightness only) in that state | unchanged (green) | `FF 98 00` at 100 % |
+| `43 43 0A 8C 00` (2700 K, keep brightness) | warm white at **1 %** | 2700 K, 1 % |
+| Power cycle after that | white 4000 K / 60 % again | 2700 K, 1 %: the change was not stored |
+| `43 43 0F A0 3C` (the shown state, complete) | no visible change | 4000 K, 60 %, stored |
+| Brightness 30 % or green 100 % set inside the night light, off, night light off, power-on | the state from before the night light | mode from before, brightness from the night light |
+| `43 42 33` (brightness only) after the night light, power cycle | white at 51 % | 51 %, stored |
+
+So the lamp stores no change made while the night light is on. After it, a
+brightness command or a colour/temperature command with a brightness brings the
+current state back in line and is stored; a colour/temperature command that
+keeps the brightness applies the night light's brightness and is not stored.
+The lamp's clock decides about the window; a power-on report alone cannot tell
+the night light from a normal power-on in colour mode, both report `FF 98 00`.
+The byte at payload offset 9 varied between `1D` and `23` over all captures, it
+behaves like a temperature reading and is not part of the light state.
+
+Since v2.3.1 the integration keeps the state shown before a night-light power-on
+(from the reports and its own commands, also over a restart). At the next normal
+power-on it shows that state and, 1.5 s later, sends it once as a complete
+command (`43 43 <K> <B>`, `43 41 <RGB> 00 <B>`, for a flow only `43 42 <B>`), which
+is invisible and makes the lamp report it again. Commands in between carry the
+kept brightness, a brightness alone goes out with the kept colour or
+temperature. It keeps nothing when the state before the night light was itself
+night-light leftovers (orange `FF 98 00` or 1 %), and it gives up when the lamp
+reports a change other than its brightness slider before the write-back.
+
 **Pairing and deleting the lamp in the app.** The app's pairing frame is `43 67 02`,
 byte-identical to the integration. The lamp answers `43 63 04` when the identifier
 is already authorized. The app's **"Delete device" sends `43 72 02`**

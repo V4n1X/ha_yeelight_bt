@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from datetime import datetime, timedelta
 from typing import Any
 from unittest.mock import patch
 
+from homeassistant.components.light import (
+    ATTR_BRIGHTNESS,
+    ATTR_COLOR_TEMP_KELVIN,
+    ATTR_RGB_COLOR,
+    DOMAIN as LIGHT_DOMAIN,
+)
 from homeassistant.components.switch import DOMAIN as SWITCH_DOMAIN
 from homeassistant.components.time import DOMAIN as TIME_DOMAIN
 from homeassistant.config_entries import ConfigEntryState
@@ -19,30 +26,48 @@ from homeassistant.const import (
     STATE_ON,
     STATE_UNAVAILABLE,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, State
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
+from homeassistant.util import dt as dt_util
 import pytest
 
 from custom_components.yeelight_bt.const import CONF_MODEL, CONF_PAIRING_ID, DOMAIN
+from custom_components.yeelight_bt.diagnostics import (
+    async_get_config_entry_diagnostics,
+)
 from custom_components.yeelight_bt.yeelightbt import (
+    CMD_POWER,
+    CMD_RGB,
     CMD_SETNIGHTLIGHT,
     COMMAND_STX,
     MODEL_CANDELA,
+    LightState,
 )
 
 from .conftest import (
+    AFTER_NIGHT_LIGHT_FRAME,
     BEDSIDE_ADDRESS,
     CANDELA_ADDRESS,
     CANDELA_PAIRING_ID,
+    GREEN_100,
+    NIGHT_LIGHT_OFF_FRAME,
+    NIGHT_LIGHT_ON_FRAME,
+    NIGHT_LIGHT_WINDOW_FRAME,
+    WHITE_60,
     FakeLampClient,
     MockConfigEntry,
+    async_fire_time_changed,
+    async_mock_restore_state_shutdown_restart,
     ble_device,
+    mock_restore_cache_with_extra_data,
+    state_frame,
 )
 
 SWITCH_ENTITY_ID = "switch.lamp_night_light"
 START_ENTITY_ID = "time.lamp_night_light_start"
 END_ENTITY_ID = "time.lamp_night_light_end"
+LIGHT_ENTITY_ID = "light.lamp"
 
 
 @pytest.fixture(autouse=True)
@@ -96,6 +121,34 @@ async def _setup(
 
 def _night_light_writes(client: FakeLampClient) -> list[bytes]:
     return [write for write in client.writes if write[1] == CMD_SETNIGHTLIGHT]
+
+
+async def _setup_with_night_light(
+    hass: HomeAssistant, connector, state: LightState
+) -> tuple[MockConfigEntry, FakeLampClient, list[datetime]]:
+    """The lamp on with the given state, night light on 22:00-09:00.
+
+    The lamp's clock (it decides about the window) starts at 01:18 and reads
+    the returned list, a frozen loop clock would stop the fake lamp's answers.
+    """
+    client = FakeLampClient(state=bytearray(state_frame(True, state)))
+    client.night_light = bytearray(NIGHT_LIGHT_WINDOW_FRAME)
+    connector(client)
+    entry = await _setup(hass)
+    now = [datetime(2026, 11, 5, 1, 18)]
+    entry.runtime_data._clock = lambda: now[0]
+    assert hass.states.get(SWITCH_ENTITY_ID).state == STATE_ON
+    return entry, client, now
+
+
+async def _light(hass: HomeAssistant, service: str, **data: Any) -> None:
+    await hass.services.async_call(
+        LIGHT_DOMAIN,
+        service,
+        {ATTR_ENTITY_ID: LIGHT_ENTITY_ID, **data},
+        blocking=True,
+    )
+    await hass.async_block_till_done(wait_background_tasks=True)
 
 
 async def test_entities_and_metadata(
@@ -300,6 +353,10 @@ async def test_candela_has_no_night_light_entities(
         )
         if registry_entry.domain in (SWITCH_DOMAIN, TIME_DOMAIN)
     ]
+    # and nothing to keep over a restart
+    data = await async_mock_restore_state_shutdown_restart(hass)
+    stored = {item.state.entity_id: item for item in data.async_get_stored_states()}
+    assert stored[LIGHT_ENTITY_ID].extra_data is None
 
 
 async def test_entities_are_removed_when_the_model_becomes_candela(
@@ -364,3 +421,164 @@ async def test_night_light_is_read_on_reload(
     assert hass.states.get(START_ENTITY_ID).state == "22:00:00"
     assert hass.states.get(END_ENTITY_ID).state == "06:30:00"
     assert client.commands().count(0x70) == 2
+
+
+async def test_light_after_night_light_switched_off(
+    hass: HomeAssistant, connector, lamp_visible: None
+) -> None:
+    """The reported bug: the night light switched off while the lamp was off.
+
+    Switched on at the lamp, it showed green at 100 % again, while Home
+    Assistant showed the orange at 1 % the lamp kept reporting.
+    """
+    entry, client, _ = await _setup_with_night_light(hass, connector, GREEN_100)
+    lamp = entry.runtime_data
+
+    # off and on at the lamp, inside the window
+    lamp.handle_notification(state_frame(False, GREEN_100))
+    lamp.handle_notification(NIGHT_LIGHT_ON_FRAME)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    state = hass.states.get(LIGHT_ENTITY_ID)
+    assert state.attributes[ATTR_RGB_COLOR] == (255, 152, 0)
+    assert state.attributes[ATTR_BRIGHTNESS] == 3
+    diagnostics = await async_get_config_entry_diagnostics(hass, entry)
+    assert diagnostics["lamp"]["power_on_state"] == GREEN_100.as_dict()
+    assert diagnostics["lamp"]["resync_pending"] is False
+
+    lamp.handle_notification(NIGHT_LIGHT_OFF_FRAME)
+    await hass.services.async_call(
+        SWITCH_DOMAIN,
+        SERVICE_TURN_OFF,
+        {ATTR_ENTITY_ID: SWITCH_ENTITY_ID},
+        blocking=True,
+    )
+    writes = len(client.writes)
+    # on again at the lamp: in color mode it reports the night light again
+    lamp.handle_notification(NIGHT_LIGHT_ON_FRAME)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    state = hass.states.get(LIGHT_ENTITY_ID)
+    assert state.state == STATE_ON
+    assert state.attributes[ATTR_RGB_COLOR] == (0, 255, 0)
+    assert state.attributes[ATTR_BRIGHTNESS] == 255
+    # written back once, so that the lamp reports it as well
+    assert client.writes[writes:] == [
+        bytes.fromhex("434100ff000064").ljust(18, b"\x00")
+    ]
+    assert not lamp.resync_pending
+    assert lamp.power_on_state is None
+
+
+async def test_turn_on_after_the_window(
+    hass: HomeAssistant, connector, lamp_visible: None
+) -> None:
+    """In the morning the lamp is back at its state, Home Assistant as well."""
+    _, client, now = await _setup_with_night_light(hass, connector, WHITE_60)
+
+    await _light(hass, SERVICE_TURN_OFF)
+    client.power_on_state = NIGHT_LIGHT_ON_FRAME
+    await _light(hass, SERVICE_TURN_ON)
+    assert hass.states.get(LIGHT_ENTITY_ID).attributes[ATTR_BRIGHTNESS] == 3
+
+    await _light(hass, SERVICE_TURN_OFF)
+    now[0] = datetime(2026, 11, 5, 9, 30)
+    client.power_on_state = AFTER_NIGHT_LIGHT_FRAME
+    await _light(hass, SERVICE_TURN_ON)
+
+    state = hass.states.get(LIGHT_ENTITY_ID)
+    assert state.attributes[ATTR_COLOR_TEMP_KELVIN] == 4000
+    assert state.attributes[ATTR_BRIGHTNESS] == 153
+    assert client.writes[-2][:3] == bytes((COMMAND_STX, CMD_POWER, 0x01))
+    assert client.writes[-1] == bytes.fromhex("43430fa03c").ljust(18, b"\x00")
+
+
+async def test_turn_on_with_brightness_after_night_light(
+    hass: HomeAssistant, connector, lamp_visible: None
+) -> None:
+    """The kept color goes with the new brightness, nothing is written after."""
+    _, client, now = await _setup_with_night_light(hass, connector, GREEN_100)
+    await _light(hass, SERVICE_TURN_OFF)
+    client.power_on_state = NIGHT_LIGHT_ON_FRAME
+    await _light(hass, SERVICE_TURN_ON)
+    await _light(hass, SERVICE_TURN_OFF)
+
+    now[0] = datetime(2026, 11, 5, 9, 30)
+    client.power_on_state = NIGHT_LIGHT_ON_FRAME
+    await _light(hass, SERVICE_TURN_ON, **{ATTR_BRIGHTNESS: 128})
+
+    assert client.commands()[-2:] == [CMD_POWER, CMD_RGB]
+    assert client.writes[-1] == bytes.fromhex("434100ff000033").ljust(18, b"\x00")
+    state = hass.states.get(LIGHT_ENTITY_ID)
+    assert state.attributes[ATTR_RGB_COLOR] == (0, 255, 0)
+    assert state.attributes[ATTR_BRIGHTNESS] == 130
+
+
+async def test_failed_write_back_is_retried(
+    hass: HomeAssistant, connector, lamp_visible: None
+) -> None:
+    """A lamp that cannot be reached gets the state when it is back."""
+    entry, client, now = await _setup_with_night_light(hass, connector, WHITE_60)
+    lamp = entry.runtime_data
+    lamp.handle_notification(state_frame(False, WHITE_60))
+    lamp.handle_notification(NIGHT_LIGHT_ON_FRAME)
+    lamp.handle_notification(NIGHT_LIGHT_OFF_FRAME)
+    now[0] = datetime(2026, 11, 5, 9, 30)
+
+    client.fail_writes = 10
+    client.is_connected = False
+    lamp.handle_notification(AFTER_NIGHT_LIGHT_FRAME)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert lamp.resync_pending
+    assert hass.states.get(LIGHT_ENTITY_ID).state == STATE_UNAVAILABLE
+
+    # the next update finds the lamp again, still reporting the leftovers
+    client.fail_writes = 0
+    client.state = bytearray(AFTER_NIGHT_LIGHT_FRAME)
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=31))
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert not lamp.resync_pending
+    assert bytes.fromhex("43430fa03c").ljust(18, b"\x00") in client.writes
+    state = hass.states.get(LIGHT_ENTITY_ID)
+    assert state.attributes[ATTR_BRIGHTNESS] == 153
+
+
+async def test_power_on_state_is_saved(
+    hass: HomeAssistant, connector, lamp_visible: None
+) -> None:
+    """The state from before the night light survives a restart."""
+    entry, _, _ = await _setup_with_night_light(hass, connector, WHITE_60)
+    lamp = entry.runtime_data
+    lamp.handle_notification(state_frame(False, WHITE_60))
+    lamp.handle_notification(NIGHT_LIGHT_ON_FRAME)
+
+    data = await async_mock_restore_state_shutdown_restart(hass)
+
+    stored = {item.state.entity_id: item for item in data.async_get_stored_states()}
+    assert stored[LIGHT_ENTITY_ID].extra_data.as_dict() == {
+        "power_on_state": WHITE_60.as_dict()
+    }
+
+
+@pytest.mark.parametrize(
+    ("stored", "restored"),
+    [
+        (WHITE_60.as_dict(), WHITE_60),
+        ({"mode": "white"}, None),
+        (None, None),
+    ],
+)
+async def test_power_on_state_is_restored(
+    hass: HomeAssistant,
+    connector,
+    lamp_visible: None,
+    stored: dict[str, Any] | None,
+    restored: LightState | None,
+) -> None:
+    mock_restore_cache_with_extra_data(
+        hass, [(State(LIGHT_ENTITY_ID, STATE_OFF), {"power_on_state": stored})]
+    )
+    connector(FakeLampClient())
+    entry = await _setup(hass)
+
+    assert entry.runtime_data.power_on_state == restored

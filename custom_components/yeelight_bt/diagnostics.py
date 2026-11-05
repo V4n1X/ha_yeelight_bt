@@ -47,6 +47,10 @@ async def async_get_config_entry_diagnostics(
                 "start": lamp.night_light.start.isoformat(),
                 "end": lamp.night_light.end.isoformat(),
             },
+            "power_on_state": None
+            if lamp.power_on_state is None
+            else lamp.power_on_state.as_dict(),
+            "resync_pending": lamp.resync_pending,
         },
         "connection_via": {
             "source": source,

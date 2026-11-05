@@ -425,6 +425,8 @@ async def test_diagnostics(hass: HomeAssistant, connector, lamp_visible: None) -
         "start": "00:00:00",
         "end": "05:00:00",
     }
+    assert diag["lamp"]["power_on_state"] is None
+    assert diag["lamp"]["resync_pending"] is False
     assert set(diag["connection_via"]) == {"source", "name"}
 
 

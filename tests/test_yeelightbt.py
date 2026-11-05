@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, time as dt_time
+from collections.abc import Awaitable, Callable
+from datetime import date, datetime, time as dt_time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -27,12 +28,14 @@ from custom_components.yeelight_bt.yeelightbt import (
     MODEL_BEDSIDE,
     MODEL_CANDELA,
     MODEL_UNKNOWN,
+    NIGHT_LIGHT_COLOR,
     PAIR_ALREADY_PAIRED,
     PAIR_LAMP_OFF,
     PAIR_NOT_PAIRED,
     PAIR_REQUESTED,
     PAIR_SUCCESS,
     Lamp,
+    LightState,
     NightLight,
     YeelightConnectionError,
     YeelightError,
@@ -41,16 +44,58 @@ from custom_components.yeelight_bt.yeelightbt import (
 )
 
 from .conftest import (
+    AFTER_NIGHT_LIGHT_FRAME,
     BEDSIDE_ADDRESS,
     BEDSIDE_VERSION_FRAME,
     CANDELA_ADDRESS,
     CANDELA_PAIRING_ID,
     CANDELA_STATE_FRAME,
+    GREEN_100,
     NIGHT_LIGHT_FRAME,
+    NIGHT_LIGHT_OFF_FRAME,
+    NIGHT_LIGHT_ON_FRAME,
+    NIGHT_LIGHT_WINDOW_FRAME,
+    WHITE_60,
+    WHITE_60_OFF_FRAME,
     FakeLampClient,
     ble_device,
     frame,
+    state_frame,
 )
+
+# The night light switched off while the lamp is off (43 71 of the window)
+NIGHT_LIGHT_DISABLED_FRAME = bytes.fromhex("437100012200090000000000000000000000")
+
+
+async def _night_light_lamp(
+    connector, now: list[datetime], before: bytes = WHITE_60_OFF_FRAME
+) -> tuple[Lamp, FakeLampClient]:
+    """A connected Bedside, off, night light on 22:00-09:00, clock from now[0]."""
+    client = FakeLampClient()
+    client.night_light = bytearray(NIGHT_LIGHT_WINDOW_FRAME)
+    connector(client)
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"), clock=lambda: now[0])
+    await lamp.send_cmd(None)
+    # the night-light answer
+    await asyncio.sleep(0)
+    lamp.handle_notification(before)
+    assert lamp.night_light == NightLight(True, dt_time(22, 0), dt_time(9, 0))
+    return lamp, client
+
+
+async def _back_from_night_light(
+    connector,
+    before: bytes = WHITE_60_OFF_FRAME,
+    after: bytes = AFTER_NIGHT_LIGHT_FRAME,
+) -> tuple[Lamp, FakeLampClient]:
+    """Night light at 01:18, off, switched on again at 09:30 (after the window)."""
+    now = [datetime(2026, 11, 5, 1, 18)]
+    lamp, client = await _night_light_lamp(connector, now, before)
+    lamp.handle_notification(NIGHT_LIGHT_ON_FRAME)
+    lamp.handle_notification(NIGHT_LIGHT_OFF_FRAME)
+    now[0] = datetime(2026, 11, 5, 9, 30)
+    lamp.handle_notification(after)
+    return lamp, client
 
 
 @pytest.mark.parametrize(
@@ -909,3 +954,332 @@ async def test_logs_once_when_unavailable_and_back(caplog, connector) -> None:
     messages = [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
     assert sum("is unavailable" in m for m in messages) == 1
     assert sum("is available again" in m for m in messages) == 1
+
+
+async def test_power_on_after_night_light_shows_the_lamp_state(connector) -> None:
+    """The night light leaves its brightness in the lamp's report (hardware test).
+
+    Switched on inside the window the lamp shows and reports orange at 1 %.
+    With the night light switched off it comes up with its state from before
+    again, but keeps reporting 1 % until a command sets the brightness.
+    """
+    now = [datetime(2026, 11, 5, 1, 18)]
+    lamp, client = await _night_light_lamp(connector, now)
+
+    lamp.handle_notification(NIGHT_LIGHT_ON_FRAME)
+    assert (lamp.mode, lamp.color, lamp.brightness) == (
+        Lamp.MODE_COLOR,
+        NIGHT_LIGHT_COLOR,
+        1,
+    )
+    assert lamp.power_on_state == WHITE_60
+    assert not lamp.resync_pending
+
+    lamp.handle_notification(NIGHT_LIGHT_OFF_FRAME)
+    lamp.handle_notification(NIGHT_LIGHT_DISABLED_FRAME)
+    lamp.handle_notification(AFTER_NIGHT_LIGHT_FRAME)
+    assert lamp.is_on
+    assert lamp.resync_pending
+    assert (lamp.mode, lamp.temperature, lamp.brightness) == (Lamp.MODE_WHITE, 4000, 60)
+
+    # polls get the leftovers as well
+    lamp.handle_notification(AFTER_NIGHT_LIGHT_FRAME)
+    assert lamp.brightness == 60
+
+    await lamp.async_resync()
+    assert client.writes[-1] == bytes.fromhex("43430fa03c").ljust(18, b"\x00")
+    assert not lamp.resync_pending
+    assert lamp.power_on_state is None
+    assert lamp.brightness == 60
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "written"),
+    [
+        # in color mode the leftovers are the night light's report itself
+        (GREEN_100, NIGHT_LIGHT_ON_FRAME, "434100ff000064"),
+        # a flow keeps running, it only gets its brightness back
+        (
+            LightState(Lamp.MODE_FLOW, (2, 0, 0), 0, 50),
+            state_frame(True, LightState(Lamp.MODE_FLOW, NIGHT_LIGHT_COLOR, 0, 1)),
+            "434232",
+        ),
+    ],
+)
+async def test_power_on_after_the_window(
+    connector, before: LightState, after: bytes, written: str
+) -> None:
+    """With the night light still on, the window decides: it ended at 09:00."""
+    lamp, client = await _back_from_night_light(
+        connector, state_frame(False, before), after
+    )
+
+    assert lamp.resync_pending
+    assert (lamp.mode, lamp.color, lamp.brightness) == (
+        before.mode,
+        before.color,
+        before.brightness,
+    )
+    await lamp.async_resync()
+    assert client.writes[-1] == bytes.fromhex(written).ljust(18, b"\x00")
+
+
+async def test_power_on_inside_the_window_again(connector) -> None:
+    """A second night-light power-on keeps the state from before the first."""
+    now = [datetime(2026, 11, 5, 1, 18)]
+    lamp, _ = await _night_light_lamp(connector, now)
+    for _ in range(2):
+        lamp.handle_notification(NIGHT_LIGHT_ON_FRAME)
+        lamp.handle_notification(NIGHT_LIGHT_OFF_FRAME)
+        now[0] = datetime(2026, 11, 5, 8, 59)
+
+    assert lamp.power_on_state == WHITE_60
+    assert not lamp.resync_pending
+    assert lamp.brightness == 1
+
+
+Command = Callable[[Lamp], Awaitable[None]]
+
+
+@pytest.mark.parametrize(
+    ("command", "written"),
+    [
+        # keeping the brightness would apply the night light's 1 % (hardware test)
+        (lambda lamp: lamp.set_temperature(2700), "43430a8c3c"),
+        (lambda lamp: lamp.set_color(255, 0, 0), "4341ff0000003c"),
+        # a brightness alone would leave the night-light color in the lamp
+        (lambda lamp: lamp.set_brightness(30), "43430fa01e"),
+        (lambda lamp: lamp.set_temperature(3000, brightness=20), "43430bb814"),
+    ],
+)
+async def test_commands_after_night_light_set_all_fields(
+    connector, command: Command, written: str
+) -> None:
+    lamp, client = await _back_from_night_light(connector)
+    assert lamp.resync_pending
+
+    await command(lamp)
+
+    assert client.writes[-1] == bytes.fromhex(written).ljust(18, b"\x00")
+    assert not lamp.resync_pending
+    assert lamp.power_on_state is None
+    # nothing is left to write back
+    writes = len(client.writes)
+    await lamp.async_resync()
+    assert len(client.writes) == writes
+
+
+async def test_changes_inside_the_night_light_are_not_kept(connector) -> None:
+    """The lamp stores nothing set while the night light is on (hardware test)."""
+    now = [datetime(2026, 11, 5, 1, 18)]
+    lamp, _ = await _night_light_lamp(connector, now)
+    lamp.handle_notification(NIGHT_LIGHT_ON_FRAME)
+
+    await lamp.set_brightness(30)
+    await lamp.set_color(0, 255, 0, brightness=100)
+    assert (lamp.color, lamp.brightness) == ((0, 255, 0), 100)
+    assert lamp.power_on_state == WHITE_60
+
+    lamp.handle_notification(state_frame(False, GREEN_100))
+    now[0] = datetime(2026, 11, 5, 9, 30)
+    # captured: the mode comes back, the brightness set inside the night light stays
+    lamp.handle_notification(bytes.fromhex("4345010200000000640fa022000000000000"))
+    assert lamp.resync_pending
+    assert (lamp.mode, lamp.temperature, lamp.brightness) == (Lamp.MODE_WHITE, 4000, 60)
+
+
+async def test_unknown_state_before_the_night_light(connector) -> None:
+    """Leftovers of an earlier night light are no state to write back."""
+    lamp, client = await _back_from_night_light(connector, before=NIGHT_LIGHT_OFF_FRAME)
+
+    assert lamp.power_on_state is None
+    assert not lamp.resync_pending
+    # the report is all that is known
+    assert (lamp.mode, lamp.temperature, lamp.brightness) == (Lamp.MODE_WHITE, 4000, 1)
+    writes = len(client.writes)
+    await lamp.async_resync()
+    assert len(client.writes) == writes
+
+
+async def test_brightness_changed_on_the_lamp_before_the_write_back(connector) -> None:
+    """The lamp's slider changes only the brightness of the report."""
+    lamp, client = await _back_from_night_light(connector)
+
+    lamp.handle_notification(
+        state_frame(True, LightState(Lamp.MODE_WHITE, (0, 0, 0), 4000, 80))
+    )
+
+    assert lamp.resync_pending
+    assert lamp.brightness == 80
+    await lamp.async_resync()
+    assert client.writes[-1] == bytes.fromhex("43430fa050").ljust(18, b"\x00")
+
+
+async def test_other_change_on_the_lamp_before_the_write_back(connector) -> None:
+    """Any other change: the lamp no longer shows the kept state."""
+    lamp, client = await _back_from_night_light(connector)
+    red = LightState(Lamp.MODE_COLOR, (255, 0, 0), 0, 1)
+
+    lamp.handle_notification(state_frame(True, red))
+
+    assert not lamp.resync_pending
+    assert lamp.power_on_state is None
+    assert (lamp.mode, lamp.color, lamp.brightness) == (Lamp.MODE_COLOR, (255, 0, 0), 1)
+    writes = len(client.writes)
+    await lamp.async_resync()
+    assert len(client.writes) == writes
+
+
+async def test_switched_off_before_the_write_back(connector) -> None:
+    """The lamp keeps its leftovers, the next power-on writes back instead."""
+    lamp, client = await _back_from_night_light(connector)
+
+    lamp.handle_notification(bytes.fromhex("4345020200000000010fa022000000000000"))
+    assert not lamp.resync_pending
+    assert lamp.power_on_state == WHITE_60
+    writes = len(client.writes)
+    await lamp.async_resync()
+    assert len(client.writes) == writes
+
+    lamp.handle_notification(AFTER_NIGHT_LIGHT_FRAME)
+    assert lamp.resync_pending
+    assert lamp.brightness == 60
+
+
+async def test_power_on_command_and_its_report(connector) -> None:
+    """Home Assistant's own power-on: its report decides, then commands follow."""
+    now = [datetime(2026, 11, 5, 1, 18)]
+    lamp, client = await _night_light_lamp(connector, now)
+
+    client.power_on_state = NIGHT_LIGHT_ON_FRAME
+    await lamp.turn_on()
+    await lamp.async_wait_power_on()
+    assert lamp.power_on_state == WHITE_60
+    assert lamp.brightness == 1
+
+    await lamp.turn_off()
+    now[0] = datetime(2026, 11, 5, 9, 30)
+    client.power_on_state = AFTER_NIGHT_LIGHT_FRAME
+    await lamp.turn_on()
+    await lamp.async_wait_power_on()
+    assert lamp.resync_pending
+    assert lamp.brightness == 60
+
+    await lamp.turn_off()
+    assert not lamp.resync_pending
+    assert lamp.power_on_state == WHITE_60
+
+
+async def test_late_power_on_report_is_not_a_power_on(connector) -> None:
+    """A report arriving after the following commands no longer decides."""
+    now = [datetime(2026, 11, 5, 1, 18)]
+    lamp, client = await _night_light_lamp(connector, now)
+    lamp.handle_notification(NIGHT_LIGHT_ON_FRAME)
+    lamp.handle_notification(NIGHT_LIGHT_OFF_FRAME)
+    now[0] = datetime(2026, 11, 5, 9, 30)
+
+    handler = client._handler
+    client._handler = None
+    with patch.object(yeelightbt, "POWER_ON_REPORT_TIMEOUT", 0.01):
+        await lamp.turn_on()
+        await lamp.async_wait_power_on()
+    assert handler is not None
+    handler(None, bytearray(AFTER_NIGHT_LIGHT_FRAME))
+
+    assert not lamp.resync_pending
+    assert lamp.brightness == 1
+    assert lamp.power_on_state == WHITE_60
+
+
+async def test_failed_power_on_command_expects_no_report(connector) -> None:
+    lamp, client = await _night_light_lamp(connector, [datetime(2026, 11, 5, 9, 30)])
+    client.fail_writes = 10
+
+    with pytest.raises(YeelightError):
+        await lamp.turn_on()
+
+    assert not lamp._power_on_expected
+
+
+async def test_report_after_reconnecting_is_not_a_power_on(connector) -> None:
+    """The lamp may have been switched while the link was down."""
+    lamp, client = await _back_from_night_light(connector, after=NIGHT_LIGHT_OFF_FRAME)
+    assert lamp.power_on_state == WHITE_60
+
+    client.disconnected_callback(client)
+    lamp.handle_notification(AFTER_NIGHT_LIGHT_FRAME)
+
+    assert not lamp.resync_pending
+    assert lamp.brightness == 1
+
+
+@pytest.mark.parametrize(
+    ("window", "now", "night_light"),
+    [
+        ("437101012200090000000000000000000000", dt_time(21, 59), False),
+        ("437101012200090000000000000000000000", dt_time(22, 0), True),
+        ("437101012200090000000000000000000000", dt_time(1, 0), True),
+        ("437101012200090000000000000000000000", dt_time(8, 59), True),
+        ("437101012200090000000000000000000000", dt_time(9, 0), False),
+        ("437101010000050000000000000000000000", dt_time(0, 0), True),
+        ("437101010000050000000000000000000000", dt_time(5, 0), False),
+        ("437101010000050000000000000000000000", dt_time(23, 0), False),
+        # equal times: the whole day, a write-back could override the night light
+        ("437101011200120000000000000000000000", dt_time(3, 0), True),
+        ("437100012200090000000000000000000000", dt_time(1, 0), False),
+        # window not read yet
+        (None, dt_time(12, 0), True),
+    ],
+)
+def test_night_light_power_on_follows_the_window(
+    window: str | None, now: dt_time, night_light: bool
+) -> None:
+    lamp = Lamp(
+        ble_device(BEDSIDE_ADDRESS, "XMCTD_1"),
+        clock=lambda: datetime.combine(date(2026, 11, 5), now),
+    )
+    if window is not None:
+        lamp.handle_notification(bytes.fromhex(window))
+
+    on = LightState(Lamp.MODE_COLOR, NIGHT_LIGHT_COLOR, 0, 1)
+    assert lamp._night_light_power_on(on) is night_light
+    # any other report is a normal power-on
+    assert not lamp._night_light_power_on(WHITE_60)
+    assert not lamp._night_light_power_on(GREEN_100)
+
+
+def test_power_on_state_storage_and_restore() -> None:
+    assert LightState.from_dict(GREEN_100.as_dict()) == GREEN_100
+    for data in (
+        None,
+        {},
+        {**GREEN_100.as_dict(), "color": [0, 255]},
+        {**GREEN_100.as_dict(), "brightness": "high"},
+    ):
+        assert LightState.from_dict(data) is None
+
+    lamp = Lamp(ble_device(BEDSIDE_ADDRESS, "XMCTD_1"))
+    for unusable in (
+        None,
+        LightState(Lamp.MODE_COLOR, NIGHT_LIGHT_COLOR, 0, 100),
+        LightState(Lamp.MODE_COLOR, (0, 0, 0), 0, 100),
+        LightState(Lamp.MODE_WHITE, (0, 0, 0), 4000, 1),
+        LightState(Lamp.MODE_WHITE, (0, 0, 0), 0, 60),
+        LightState(0, (0, 0, 0), 0, 60),
+    ):
+        lamp.restore_power_on_state(unusable)
+        assert lamp.power_on_state is None
+    lamp.restore_power_on_state(GREEN_100)
+    assert lamp.power_on_state == GREEN_100
+    # one known in this run wins
+    lamp.restore_power_on_state(WHITE_60)
+    assert lamp.power_on_state == GREEN_100
+    # without a clock the night-light color is taken for the night light
+    lamp.handle_notification(NIGHT_LIGHT_WINDOW_FRAME)
+    assert lamp._night_light_power_on(
+        LightState(Lamp.MODE_COLOR, NIGHT_LIGHT_COLOR, 0, 1)
+    )
+
+    candela = Lamp(ble_device(CANDELA_ADDRESS, "yeelight_ms"))
+    candela.restore_power_on_state(GREEN_100)
+    assert candela.power_on_state is None
